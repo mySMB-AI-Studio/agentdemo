@@ -1,0 +1,8 @@
+node_modules/
+.env
+.browser-session/
+demos/*/clips/*.mp4
+demos/*/clips/*.webm
+demos/*/screenshots/*.png
+demos/*/output/demo.html
+*.log
