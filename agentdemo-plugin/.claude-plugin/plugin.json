@@ -1,0 +1,13 @@
+{
+  "name": "agentdemo",
+  "description": "Automated demo recording for Copilot Studio agents. Captures screenshots of agents responding in M365 Copilot and generates a self-contained Storylane-style demo.html file.",
+  "version": "1.0.0",
+  "author": {
+    "name": "mySMB.com",
+    "url": "https://mysmb.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mySMB-AI-Studio/agentdemo"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "agentdemo": {
+      "command": "node",
+      "args": ["src/mcp-server.js"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "DEMO_EMAIL": "${env:DEMO_EMAIL}",
+        "DEMO_PASSWORD": "${env:DEMO_PASSWORD}",
+        "DEMO_TENANT": "${env:DEMO_TENANT}",
+        "ANTHROPIC_API_KEY": "${env:ANTHROPIC_API_KEY}"
+      }
+    }
+  }
+}
