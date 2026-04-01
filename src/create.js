@@ -1437,7 +1437,7 @@ function generatePlaceholderGuide(slides, agentName, demoDir, slug, connectionEv
 // STEP 5: Generate Storylane-style demo.html
 // ───────────────────────────────────────────
 
-function generateDemoHTML(slides, agentName, description, m365Url, brandColor = '#6B2FD9') {
+function generateDemoHTML(slides, agentName, description, m365Url, brandColor = '#00C9A7') {
   // Build slides data for the HTML
   const slidesData = [];
 
@@ -1493,10 +1493,10 @@ function generateDemoHTML(slides, agentName, description, m365Url, brandColor = 
 <title>${agentName} — Interactive Demo</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0a; color: #fff; overflow: hidden; height: 100vh; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #F5F5F0; color: #fff; overflow: hidden; height: 100vh; }
 
 /* Top bar */
-.top-bar { position: fixed; top: 0; left: 0; right: 0; height: 48px; background: #1a1a1a; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; z-index: 100; border-bottom: 1px solid #333; }
+.top-bar { position: fixed; top: 0; left: 0; right: 0; height: 48px; background: #1A1A1A; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; z-index: 100; border-bottom: 1px solid #333; }
 .top-bar .agent-name { font-size: 14px; font-weight: 600; color: #ccc; }
 .top-bar .slide-counter { font-size: 13px; color: #888; }
 .progress-bar { position: fixed; top: 48px; left: 0; right: 0; height: 3px; background: #333; z-index: 100; }
@@ -1517,8 +1517,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 /* Callout bubble — Storylane style */
 .callout { position: absolute; max-width: 320px; background: ${brandColor}; color: #fff; border-radius: 12px; padding: 20px; font-size: 14px; line-height: 1.5; box-shadow: 0 8px 24px rgba(0,0,0,0.3); z-index: 50; opacity: 0; transform: translateY(10px); animation: calloutIn 0.35s ease forwards; animation-delay: 0.3s; }
 .callout .callout-text { margin-bottom: 16px; }
-.callout .callout-btn { display: inline-block; padding: 8px 20px; background: rgba(255,255,255,0.2); color: #fff; border: 1px solid rgba(255,255,255,0.3); border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
-.callout .callout-btn:hover { background: rgba(255,255,255,0.35); }
+.callout .callout-btn { display: inline-block; padding: 8px 20px; background: #1A1A1A; color: #fff; border: none; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+.callout .callout-btn:hover { background: #333; }
 .callout-pointer { position: absolute; width: 12px; height: 12px; background: ${brandColor}; border-radius: 50%; }
 @keyframes calloutIn { to { opacity: 1; transform: translateY(0); } }
 
@@ -1538,13 +1538,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .slide-intro, .slide-outro { position: fixed; top: 51px; left: 40px; right: 40px; bottom: 60px; display: flex; flex-direction: column; align-items: center; justify-content: center; background: ${brandColor}; border-radius: 12px; }
 .slide-intro h1 { font-size: 42px; font-weight: 700; margin-bottom: 12px; }
 .slide-intro p { font-size: 18px; opacity: 0.85; margin-bottom: 32px; max-width: 500px; text-align: center; }
-.slide-intro .start-btn, .slide-outro .cta-btn { padding: 14px 40px; background: #fff; color: ${brandColor}; font-size: 16px; font-weight: 700; border: none; border-radius: 8px; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; }
+.slide-intro .start-btn, .slide-outro .cta-btn { padding: 14px 40px; background: #1A1A1A; color: #fff; font-size: 16px; font-weight: 700; border: none; border-radius: 8px; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; }
 .slide-intro .start-btn:hover, .slide-outro .cta-btn:hover { transform: scale(1.05); box-shadow: 0 8px 20px rgba(0,0,0,0.2); }
 .slide-outro h2 { font-size: 32px; margin-bottom: 12px; }
 .slide-outro p { font-size: 16px; opacity: 0.85; margin-bottom: 28px; text-align: center; max-width: 450px; }
 
 /* Bottom bar */
-.bottom-bar { position: fixed; bottom: 0; left: 0; right: 0; height: 60px; display: flex; align-items: center; justify-content: center; gap: 8px; background: #0a0a0a; z-index: 100; }
+.bottom-bar { position: fixed; bottom: 0; left: 0; right: 0; height: 60px; display: flex; align-items: center; justify-content: center; gap: 8px; background: #1A1A1A; z-index: 100; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: #444; cursor: pointer; transition: all 0.2s; }
 .dot.active { background: ${brandColor}; width: 24px; border-radius: 4px; }
 

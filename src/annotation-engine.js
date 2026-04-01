@@ -124,7 +124,7 @@ export function renderAnnotation(annotation, index) {
   const { type, position, label, description, highlight_color } = annotation;
   const x = position.x;
   const y = position.y;
-  const color = highlight_color || '#0078D4';
+  const color = highlight_color || '#00C9A7';
   const bgColor = color + '1A'; // 10% opacity
 
   const tooltip = `

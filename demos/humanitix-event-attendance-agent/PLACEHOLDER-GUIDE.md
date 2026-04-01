@@ -1,15 +1,15 @@
 # Placeholder Guide — Humanitix – Event Attendance Agent
-Generated: 2026-03-31T01:33:49.307Z
+Generated: 2026-03-31T05:10:17.617Z
 
 1 slide(s) need manual screenshots. Instructions for each:
 
 ## Slide 1 — custom
 
 **What to capture:**
-Capture the main dashboard or event management interface of the Humanitix platform showing a list of events with attendee counts, ticket sales data, and registration status indicators.
+Screenshot the main Humanitix event management dashboard showing a list of active events with ticket sales data, attendee counts, and order information visible in a table or card layout.
 
 **Setup required:**
-Ensure there are several active events visible with varying attendee counts and registration data to demonstrate the platform's event management capabilities.
+Ensure at least 2-3 sample events are visible with different ticket types and some registered attendees/orders to demonstrate the data richness.
 
 **How to complete this slide:**
 1. Take the screenshot and save it to: `screenshots/1-custom-final.png`

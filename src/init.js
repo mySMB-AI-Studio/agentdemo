@@ -128,7 +128,7 @@ function askSelect(rl, question, choices) {
 
 const V = {
   required:   (max) => (v) => !v ? 'This field is required.' : v.length > max ? `Max ${max} characters.` : true,
-  hexColor:   (v) => /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(v) ? true : 'Must be a hex colour like #0078D4.',
+  hexColor:   (v) => /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(v) ? true : 'Must be a hex colour like #00C9A7.',
   url:        (v) => !v || v.startsWith('https://') ? true : 'Must start with https://',
   urlRequired:(v) => !v ? 'URL is required.' : !v.startsWith('https://') ? 'Must start with https://' : true,
   prompt:     (v) => v.length > 150 ? 'Max 150 characters for a prompt.' : true,
@@ -162,7 +162,7 @@ export async function runInit(opts) {
     // STEP 1: Agent basics (with validation)
     const title = await ask(rl, 'Agent name', opts.name || d.title || '', V.required(60));
     const description = await ask(rl, 'One-line description', d.description || '', V.required(200));
-    let brand_color = await ask(rl, 'Brand color (hex)', '#0078D4', V.hexColor);
+    let brand_color = await ask(rl, 'Brand color (hex)', '#00C9A7', V.hexColor);
     if (brand_color && !brand_color.startsWith('#')) brand_color = '#' + brand_color;
     const agent_icon = await ask(rl, 'Agent icon path (optional, press Enter to skip)', '');
     const m365_copilot_url = await ask(rl, 'M365 Copilot URL', d.m365_copilot_url || '', V.url);
@@ -576,7 +576,7 @@ async function runAutoDiscoveryInit(opts) {
       title: agentName,
       description: '',
       m365_copilot_url: m365Url,
-      brand_color: '#0078D4',
+      brand_color: '#00C9A7',
       platforms: ['m365-copilot'],
       topics: [],       // { name, triggerPhrases[], connector? }
       connections: [],   // { name, status, platform }
@@ -997,7 +997,7 @@ async function runAutoDiscoveryInit(opts) {
     const basics = {
       title: discoveredData.title,
       description: discoveredData.description || `Interactive demo for ${discoveredData.title}`,
-      brand_color: discoveredData.brand_color || '#0078D4',
+      brand_color: discoveredData.brand_color || '#00C9A7',
       agent_icon: '',
       m365_copilot_url: discoveredData.m365_copilot_url || '',
     };
@@ -1396,7 +1396,7 @@ export async function runNew(opts) {
   const yamlContent = `demo:
   title: "${opts.name}"
   description: ""
-  brand_color: "#0078D4"
+  brand_color: "#00C9A7"
   m365_copilot_url: ""
 
   slides:

@@ -60,6 +60,43 @@ These exist for power users and debugging. You don't need them for standard use.
 | `agentdemo run --config <path>` | Capture then generate |
 | `agentdemo resume --config <path>` | Resume a failed capture run |
 
+## MCP Server (Claude Code plugin)
+
+AgentDemo can run as an MCP server so you can drive it directly from Claude Code.
+
+### Register with Claude Code
+
+Add to your Claude Code `settings.json` (or `.claude/settings.json` in this project):
+
+```json
+{
+  "mcpServers": {
+    "agentdemo": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["src/mcp-server.js"],
+      "cwd": "/absolute/path/to/agentdemo"
+    }
+  }
+}
+```
+
+### Available tools
+
+| Tool | Description |
+|------|-------------|
+| `create_demo` | Create a demo from Copilot Studio + M365 Copilot URLs |
+| `get_demo_status` | Check screenshots, HTML, and status for a demo |
+| `resume_demo` | Resume an interrupted capture session |
+| `list_demos` | List all demos with status |
+| `generate_demo_html` | Regenerate HTML from existing screenshots |
+
+### Run directly
+
+```bash
+npm run mcp
+```
+
 ## How It Works
 
 1. **Discover** — Reads your agent's topics, trigger phrases, and connected platforms from Copilot Studio

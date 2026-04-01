@@ -1,0 +1,33 @@
+{
+  "name": "agentdemo",
+  "version": "1.0.0",
+  "description": "Create Storylane-style interactive demos for Microsoft Copilot Studio agents published to M365 Copilot",
+  "server": {
+    "type": "stdio",
+    "command": "node",
+    "args": ["src/mcp-server.js"],
+    "cwd": "."
+  },
+  "tools": [
+    {
+      "name": "create_demo",
+      "description": "Create a new interactive demo from Copilot Studio + M365 Copilot URLs"
+    },
+    {
+      "name": "get_demo_status",
+      "description": "Get status and output path for a demo by slug"
+    },
+    {
+      "name": "resume_demo",
+      "description": "Resume an interrupted demo capture session"
+    },
+    {
+      "name": "list_demos",
+      "description": "List all demos with their status"
+    },
+    {
+      "name": "generate_demo_html",
+      "description": "Regenerate demo HTML from existing captured screenshots"
+    }
+  ]
+}

@@ -95,7 +95,7 @@ function normalize(doc) {
   const d = doc.demo;
   const configDir = '';
 
-  d.brand_color = d.brand_color || '#0078D4';
+  d.brand_color = d.brand_color || '#00C9A7';
   d.agent_icon = d.agent_icon || null;
 
   for (const slide of d.slides) {
@@ -136,17 +136,17 @@ function normalize(doc) {
 }
 
 export const PLATFORM_COLORS = {
-  'm365-copilot': '#0078D4',
+  'm365-copilot': '#00C9A7',
   'sharepoint': '#036C70',
   'power-automate': '#0066FF',
   'teams': '#5558AF',
   'outlook': '#0072C6',
   'xero': '#13B5EA',
-  'custom': '#0078D4',
+  'custom': '#00C9A7',
 };
 
 export function getPlatformColor(platform, fallback) {
-  return PLATFORM_COLORS[platform] || fallback || '#0078D4';
+  return PLATFORM_COLORS[platform] || fallback || '#00C9A7';
 }
 
 export function getDemoDir(configPath) {

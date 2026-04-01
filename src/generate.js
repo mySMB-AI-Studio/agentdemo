@@ -207,7 +207,7 @@ export async function runGenerate(opts) {
 
   /* ── Narrative ── */
   .narrative {
-    border-left: 4px solid #0078D4;
+    border-left: 4px solid #00C9A7;
     padding: 16px 24px;
     background: #fff;
     border-radius: 0 8px 8px 0;
@@ -255,7 +255,7 @@ export async function runGenerate(opts) {
   @keyframes bubbleFadeIn { to { opacity: 1; } }
 
   .user-bubble .bubble-content {
-    background: #0078D4;
+    background: #00C9A7;
     color: #fff;
     padding: 10px 14px;
     border-radius: 16px 16px 4px 16px;
@@ -297,7 +297,7 @@ export async function runGenerate(opts) {
   .play-clip-btn {
     margin: 12px 16px;
     padding: 10px;
-    background: #0078D4;
+    background: #00C9A7;
     color: #fff;
     border: none;
     border-radius: 8px;
