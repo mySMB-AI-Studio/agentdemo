@@ -64,15 +64,23 @@ These exist for power users and debugging. You don't need them for standard use.
 
 AgentDemo can run as an MCP server so you can drive it directly from Claude Code.
 
-### Register with Claude Code
+### Prerequisites
 
-Add to your Claude Code `settings.json` (or `.claude/settings.json` in this project):
+1. **Clone this repo** and run `npm install` inside the `agentdemo` folder.
+2. **Create your `.env` file** — copy `.env.example` to `.env` and fill in your credentials. The MCP server loads credentials from `.env` automatically at startup, so they do not need to be passed through the plugin config.
+
+### Install the plugin
+
+Import `agentdemo-plugin.zip` into Claude Code. The plugin's `.mcp.json` points to `src/mcp-server.js` in this repo — no environment variables are needed in the plugin config since they are read from `.env`.
+
+### Register manually (alternative)
+
+If you prefer not to use the plugin zip, add this to your Claude Code `settings.json`:
 
 ```json
 {
   "mcpServers": {
     "agentdemo": {
-      "type": "stdio",
       "command": "node",
       "args": ["src/mcp-server.js"],
       "cwd": "/absolute/path/to/agentdemo"

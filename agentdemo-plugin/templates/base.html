@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{TITLE}} — Interactive Demo</title>
+<style>
+  {{STYLES}}
+</style>
+</head>
+<body>
+  <div class="top-bar">
+    <div class="top-left">
+      {{AGENT_ICON}}
+      <span class="agent-title">{{TITLE}}</span>
+    </div>
+    <span class="slide-counter" id="slideCounter">1 of {{TOTAL_SLIDES}}</span>
+  </div>
+  <div class="progress-bar">
+    <div class="progress-fill" id="progressFill"></div>
+  </div>
+  <div class="slides-wrapper">
+    <div class="slides-track" id="slidesTrack">
+      {{SLIDES}}
+    </div>
+  </div>
+  <div class="bottom-bar">
+    <button class="nav-btn" id="prevBtn" onclick="navigate(-1)" disabled>← Back</button>
+    <span id="platformBadge"></span>
+    <button class="nav-btn primary" id="nextBtn" onclick="navigate(1)">Next →</button>
+  </div>
+  <script>
+    {{SCRIPT}}
+  </script>
+</body>
+</html>
