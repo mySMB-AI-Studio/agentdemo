@@ -1745,9 +1745,26 @@ export async function runCreate(opts) {
     // STEP 2: Auto-discover from Copilot Studio
     discovered = await discoverFromStudio(activePage, studioUrl);
 
+    // Apply pre-fill overrides from opts (MCP mode or CLI flags)
+    if (opts.agentName) discovered.name = opts.agentName;
+    if (opts.instructions) discovered.instructions = opts.instructions;
+    if (opts.platforms) {
+      const prefilled = opts.platforms.split(',').map(p => p.trim().toLowerCase()).filter(Boolean);
+      for (const p of prefilled) {
+        if (!discovered.connections.some(c => c.platform === p)) {
+          discovered.connections.push({ name: p, platform: p });
+        }
+      }
+    }
+
     // If discovery returned nothing useful, ask user for manual input
     // Close browser first so readline works on MINGW64
-    if (discovered.name === 'My Agent' || (discovered.topics.length === 0 && discovered.connections.length === 0)) {
+    const needsFallback = discovered.name === 'My Agent' || (discovered.topics.length === 0 && discovered.connections.length === 0);
+    if (needsFallback && opts.mcpMode) {
+      // In MCP mode we can't use readline — skip interactive fallback.
+      // Pre-fill values from opts are already applied above; proceed with what we have.
+      console.log('  ⚠ Auto-discovery returned limited data. Proceeding with pre-filled values.');
+    } else if (needsFallback) {
       await activePage.close().catch(() => {});
       await activeBrowser.close().catch(() => {});
       await askManualFallback(discovered);

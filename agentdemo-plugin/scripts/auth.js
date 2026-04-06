@@ -60,7 +60,7 @@ export async function saveSession(context) {
 export async function isSessionValid(context) {
   const page = await context.newPage();
   try {
-    await page.goto('https://www.office.com', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.goto('https://www.office.com', { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForTimeout(3000);
     const url = page.url();
     const isValid = !url.includes('login.microsoftonline.com') && !url.includes('login.live.com');
@@ -80,12 +80,53 @@ export async function performLogin(context) {
     throw new Error('DEMO_EMAIL and DEMO_PASSWORD must be set in .env file');
   }
 
-  const page = await context.newPage();
-  await page.goto('https://login.microsoftonline.com', { waitUntil: 'domcontentloaded' });
+  // ── Already logged in? ──────────────────────────────────────────────────────
+  // Navigate to M365 first. If it loads without redirecting to login, save
+  // the current session and return early — no re-login needed.
+  const checkPage = await context.newPage();
+  try {
+    await checkPage.goto('https://m365.cloud.microsoft', {
+      waitUntil: 'domcontentloaded',
+      timeout: 60000,
+    });
+    await checkPage.waitForTimeout(3000);
+    const checkUrl = checkPage.url();
+    if (!checkUrl.includes('login.microsoftonline.com') && !checkUrl.includes('login.live.com')) {
+      await checkPage.close();
+      await saveSession(context);
+      console.log(`✓ Already logged in as ${email} — session saved.`);
+      return;
+    }
+  } catch { /* not yet logged in, fall through */ }
+  await checkPage.close();
 
-  // Enter email
-  await page.waitForSelector('input[type="email"]', { timeout: 15000 });
-  await page.fill('input[type="email"]', email);
+  // ── Fresh login ─────────────────────────────────────────────────────────────
+  const page = await context.newPage();
+  await page.goto('https://login.microsoftonline.com', { waitUntil: 'domcontentloaded', timeout: 60000 });
+
+  // Wait for page to fully settle before searching for inputs
+  await page.waitForLoadState('networkidle', { timeout: 60000 });
+
+  // Enter email — try fallback selectors in order
+  const EMAIL_SELECTORS = [
+    'input[type="email"]',
+    'input[name="loginfmt"]',
+    'input[id="i0116"]',
+    '[data-testid="i0116"]',
+  ];
+  let emailFilled = false;
+  for (const sel of EMAIL_SELECTORS) {
+    try {
+      await page.waitForSelector(sel, { timeout: 60000 });
+      await page.fill(sel, email);
+      emailFilled = true;
+      break;
+    } catch { /* try next */ }
+  }
+  if (!emailFilled) {
+    throw new Error('Could not find email input on login page. Check the login URL or increase timeout.');
+  }
+
   await page.click('input[type="submit"]');
 
   // Wait for password field or redirect
@@ -93,7 +134,7 @@ export async function performLogin(context) {
 
   // Enter password
   try {
-    await page.waitForSelector('input[type="password"]', { timeout: 10000 });
+    await page.waitForSelector('input[type="password"]', { timeout: 60000 });
     await page.fill('input[type="password"]', password);
     await page.click('input[type="submit"]');
   } catch {
@@ -156,7 +197,7 @@ export async function verifyCopilot(context) {
   try {
     await page.goto('https://m365.cloud.microsoft', {
       waitUntil: 'domcontentloaded',
-      timeout: 30000,
+      timeout: 60000,
     });
     await page.waitForTimeout(5000);
 
@@ -211,20 +252,24 @@ export async function runAuth(opts) {
     return;
   }
 
-  const { browser, context } = await createBrowserContext();
-
-  // Check if existing session is valid
+  // Check if an existing session is still valid before opening the browser
   if (fs.existsSync(STATE_FILE)) {
-    const valid = await isSessionValid(context);
+    const { browser: checkBrowser, context: checkContext } = await createBrowserContext({ headless: true });
+    const valid = await isSessionValid(checkContext);
+    await checkBrowser.close();
+
     if (valid && !opts.verifyCopilot) {
       console.log(`✓ Existing session is valid for ${process.env.DEMO_EMAIL}`);
-      if (opts.verifyCopilot) {
-        await verifyCopilot(context);
-      }
-      await browser.close();
       return;
     }
+
+    // Session is expired — wipe stale cookies/storage so login starts clean
+    console.log('Session expired. Clearing stale session data before re-logging in...');
+    fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+    fs.mkdirSync(SESSION_DIR);
   }
+
+  const { browser, context } = await createBrowserContext();
 
   // Perform fresh login
   await performLogin(context);

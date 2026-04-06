@@ -58,6 +58,18 @@ const TOOLS = [
           description: 'Run browser in headless mode (default: false)',
           default: false,
         },
+        agent_name: {
+          type: 'string',
+          description: 'Pre-fill agent name (used if auto-discovery fails)',
+        },
+        instructions: {
+          type: 'string',
+          description: 'Pre-fill agent instructions (used if auto-discovery fails)',
+        },
+        platforms: {
+          type: 'string',
+          description: 'Comma-separated platforms the agent connects to, e.g. "sharepoint,custom" (used if auto-discovery fails)',
+        },
       },
       required: ['studio_url', 'm365_url'],
     },
@@ -127,7 +139,7 @@ const TOOLS = [
 // ── Tool handlers ─────────────────────────────────────────────────────────────
 
 async function handleCreateDemo(args) {
-  const { studio_url, m365_url, slug, headless = false } = args;
+  const { studio_url, m365_url, slug, headless = false, agent_name, instructions, platforms } = args;
 
   if (!studio_url || !m365_url) {
     return { error: 'studio_url and m365_url are required' };
@@ -141,6 +153,10 @@ async function handleCreateDemo(args) {
       headless,
       // MCP mode: disable interactive readline prompts
       mcpMode: true,
+      // Pre-fill values for fallback if auto-discovery fails
+      agentName: agent_name || undefined,
+      instructions: instructions || undefined,
+      platforms: platforms || undefined,
     });
 
     // Find the output after create
