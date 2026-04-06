@@ -49,6 +49,18 @@ const TOOLS = [
           type: 'string',
           description: 'M365 Copilot chat URL where the agent is published',
         },
+        agent_name: {
+          type: 'string',
+          description: 'Agent name to use if Copilot Studio discovery fails',
+        },
+        instructions: {
+          type: 'string',
+          description: 'Agent instructions to use if Copilot Studio discovery fails',
+        },
+        platforms: {
+          type: 'string',
+          description: 'Comma-separated list of platforms the agent connects to (e.g. "sharepoint,custom")',
+        },
         slug: {
           type: 'string',
           description: 'Optional folder name for the demo (auto-derived from agent name if omitted)',
@@ -127,7 +139,7 @@ const TOOLS = [
 // ── Tool handlers ─────────────────────────────────────────────────────────────
 
 async function handleCreateDemo(args) {
-  const { studio_url, m365_url, slug, headless = false } = args;
+  const { studio_url, m365_url, agent_name, instructions, platforms, slug, headless = false } = args;
 
   if (!studio_url || !m365_url) {
     return { error: 'studio_url and m365_url are required' };
@@ -137,6 +149,9 @@ async function handleCreateDemo(args) {
     await runCreate({
       studioUrl: studio_url,
       m365Url: m365_url,
+      agentName: agent_name || undefined,
+      instructions: instructions || undefined,
+      platforms: platforms || undefined,
       slug: slug || undefined,
       headless,
       // MCP mode: disable interactive readline prompts

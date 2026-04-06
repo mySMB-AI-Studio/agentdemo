@@ -1745,13 +1745,34 @@ export async function runCreate(opts) {
     // STEP 2: Auto-discover from Copilot Studio
     discovered = await discoverFromStudio(activePage, studioUrl);
 
-    // If discovery returned nothing useful, ask user for manual input
+    // If discovery returned nothing useful, use opts overrides or ask user for manual input
     // Close browser first so readline works on MINGW64
     if (discovered.name === 'My Agent' || (discovered.topics.length === 0 && discovered.connections.length === 0)) {
-      await activePage.close().catch(() => {});
-      await activeBrowser.close().catch(() => {});
-      await askManualFallback(discovered);
-      // Re-open browser for capture
+      // Apply MCP-supplied overrides before potentially asking user
+      if (opts.agentName) discovered.name = opts.agentName;
+      if (opts.instructions) discovered.instructions = opts.instructions;
+      if (opts.platforms) {
+        const platList = opts.platforms.split(',').map(p => p.trim().toLowerCase()).filter(Boolean);
+        for (const p of platList) {
+          if (!discovered.connections.some(c => c.platform === p)) {
+            discovered.connections.push({ name: p, platform: p });
+          }
+        }
+      }
+
+      // In MCP mode with opts provided, skip interactive fallback
+      const hasOverrides = opts.agentName || opts.instructions || opts.platforms;
+      if (!opts.mcpMode || !hasOverrides) {
+        await activePage.close().catch(() => {});
+        await activeBrowser.close().catch(() => {});
+        await askManualFallback(discovered);
+        // Re-open browser for capture
+      } else {
+        console.log(`  ✓ Using provided agent details: ${discovered.name}`);
+        await activePage.close().catch(() => {});
+        await activeBrowser.close().catch(() => {});
+      }
+
       const reopened = await createBrowserContext({ headless });
       const validAgain = await isSessionValid(reopened.context);
       if (!validAgain) {
