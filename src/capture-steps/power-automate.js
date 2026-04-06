@@ -6,44 +6,38 @@ export async function capturePowerAutomate(ctx) {
   const result = { status: 'done', screenshot: null, clip: null };
 
   try {
-    await page.goto(slide.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(5000);
+    await page.goto(slide.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.waitForLoadState('networkidle').catch(() => {});
+    await page.waitForTimeout(3000);
 
     // Check for auth redirect
     if (page.url().includes('login.microsoftonline.com')) {
       throw new Error('Auth expired — redirected to login.microsoftonline.com');
     }
 
-    // Wait for flow diagram/steps panel
-    const flowSelectors = [
-      '[data-testid="flow-designer"]',
-      '.ms-flow-designer',
-      '[class*="FlowDesigner"]',
-      '[class*="flow-detail"]',
-      '.flow-header',
-      '[data-automation-id="flow-details"]',
+    // Wait for flows LIST (table/grid), NOT individual flow diagram
+    const flowListSelectors = [
+      '[role="grid"]',
+      '.ms-DetailsRow',
+      '[data-automationid]',
+      'table',
+      '.ms-List',
+      '.ms-DetailsList',
+      '[data-testid="flow-list"]',
+      '[class*="FlowList"]',
     ];
 
-    for (const sel of flowSelectors) {
+    for (const sel of flowListSelectors) {
       try {
         await page.waitForSelector(sel, { timeout: 10000 });
         break;
       } catch { /* try next */ }
     }
 
-    // Try to collapse expanded action cards for clean overview
-    const expandedCards = await page.$$('[aria-expanded="true"]');
-    for (const card of expandedCards) {
-      try {
-        await card.click();
-        await page.waitForTimeout(300);
-      } catch { /* ignore if click fails */ }
-    }
-
+    // Additional wait for rendering
     await page.waitForTimeout(2000);
 
-    // IMPORTANT: Mask sensitive data that might be visible
-    // Look for connection details, credentials, API keys
+    // Mask sensitive data that might be visible
     const sensitiveSelectors = [
       '[data-testid="connection-string"]',
       '[class*="credential"]',

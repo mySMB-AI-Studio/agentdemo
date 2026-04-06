@@ -25,6 +25,13 @@ program
   .option('--studio-url <url>', 'Direct link to agent in Copilot Studio')
   .option('--m365-url <url>', 'Direct link to agent in M365 Copilot')
   .option('--headless', 'Run browser invisibly in the background')
+  .option('--platforms <list>', 'Comma-separated platforms, e.g. "sharepoint,power-automate"')
+  .option('--sharepoint-url <url>', 'SharePoint list or site URL to capture')
+  .option('--power-automate-url <url>', 'Power Automate cloud flows page URL to capture')
+  .option('--teams-url <url>', 'Microsoft Teams channel URL to capture')
+  .option('--outlook-url <url>', 'Outlook email or folder URL to capture')
+  .option('--xero-url <url>', 'Xero page URL to capture')
+  .option('--custom-url <urls...>', 'Custom platform URL(s) to capture (can be repeated)')
   .action(async (opts) => {
     const { runCreate } = await import('./src/create.js');
     await runCreate(opts);

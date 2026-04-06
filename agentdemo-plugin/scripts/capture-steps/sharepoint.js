@@ -40,8 +40,12 @@ export async function captureSharePoint(ctx) {
     // Additional wait for rendering
     await page.waitForTimeout(2000);
 
+    // Scroll down slightly to hide top toolbar and show more list rows
+    await page.evaluate(() => window.scrollBy(0, 200));
+    await page.waitForTimeout(1000);
+
     const screenshotPath = path.join(screenshotsDir, slide.screenshot_filename);
-    await page.screenshot({ path: screenshotPath, fullPage: true });
+    await page.screenshot({ path: screenshotPath, fullPage: false });
     result.screenshot = screenshotPath;
   } finally {
     await page.close();

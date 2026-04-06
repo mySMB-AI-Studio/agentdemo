@@ -834,32 +834,149 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedPrompts 
   const connectionEvents = []; // { platform, screenshotPath } — for connection setup slide
   let slideId = 1;
 
+  // ── Platform display names ──
+  const PLATFORM_DISPLAY = {
+    'sharepoint': 'SharePoint',
+    'power-automate': 'Power Automate',
+    'teams': 'Microsoft Teams',
+    'outlook': 'Outlook',
+    'xero': 'Xero',
+    'custom': 'Custom Platform',
+  };
+
   // ── Capture connected platform slides first ──
-  for (const conn of discovered.connections) {
+  const platformConns = discovered.connections.filter(c => c.platform !== 'm365-copilot');
+  if (platformConns.length > 0) {
+    console.log('  ● Capturing supporting platforms...\n');
+  }
+
+  for (const conn of platformConns) {
     const platform = conn.platform;
-    if (platform === 'm365-copilot') continue;
+    const displayName = PLATFORM_DISPLAY[platform] || platform;
 
-    console.log(`  ● Capturing ${platform}...`);
+    if (conn.url) {
+      // ── Live capture for this platform ──
+      console.log(`  ● Slide ${slideId} — ${displayName}`);
+      console.log(`    Navigating to ${displayName}...`);
 
-    // These external platforms typically can't be auto-captured:
-    // they need a trigger to have fired (email sent, flow run, invoice updated).
-    // Create a placeholder slide with metadata for the developer.
-    slides.push({
-      id: slideId++,
-      platform,
-      type: 'platform',
-      placeholder: true,
-      connectorName: conn.name,
-      screenshot: null,
-      clip: null,
-      prompt: null,
-      callout: null,
-      placeholderInfo: null, // filled by AI later
-    });
-    console.log(`    → Placeholder (needs manual screenshot)`);
+      const ssFilename = `${slideId}-${platform}-final.png`;
+      const ssPath = path.join(screenshotsDir, ssFilename);
+      let captured = false;
+
+      try {
+        await page.goto(conn.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await page.waitForLoadState('networkidle').catch(() => {});
+
+        // Check for auth redirect
+        if (page.url().includes('login.microsoftonline.com') || page.url().includes('login.live.com')) {
+          throw new Error('Auth expired — redirected to login');
+        }
+
+        // Platform-specific wait and prep
+        if (platform === 'sharepoint') {
+          await page.waitForTimeout(3000);
+          // Wait for list/table content
+          const spSelectors = ['[role="grid"]', '.ms-List', '.ms-DetailsList', 'table', '[data-automationid="ListCell"]'];
+          for (const sel of spSelectors) {
+            try { await page.waitForSelector(sel, { timeout: 10000 }); break; } catch { /* next */ }
+          }
+          await page.waitForTimeout(2000);
+          // Scroll down to hide toolbar, show more rows
+          await page.evaluate(() => window.scrollBy(0, 200));
+          await page.waitForTimeout(1000);
+
+        } else if (platform === 'power-automate') {
+          await page.waitForTimeout(3000);
+          // Wait for flows LIST table
+          const paSelectors = ['[role="grid"]', '.ms-DetailsRow', '[data-automationid]', 'table', '.ms-List', '.ms-DetailsList'];
+          for (const sel of paSelectors) {
+            try { await page.waitForSelector(sel, { timeout: 10000 }); break; } catch { /* next */ }
+          }
+          await page.waitForTimeout(2000);
+          // Mask sensitive data
+          for (const sel of ['[data-testid="connection-string"]', '[class*="credential"]', '[class*="secret"]', 'input[type="password"]']) {
+            const els = await page.$$(sel);
+            for (const el of els) { await el.evaluate(n => { n.style.visibility = 'hidden'; }); }
+          }
+
+        } else if (platform === 'teams') {
+          await page.waitForTimeout(5000);
+          const tSelectors = ['[data-tid="messageBodyContent"]', '[role="main"]', '.message-body', '.ts-message-list-container'];
+          for (const sel of tSelectors) {
+            try { await page.waitForSelector(sel, { timeout: 15000 }); break; } catch { /* next */ }
+          }
+          await page.waitForTimeout(2000);
+
+        } else if (platform === 'outlook') {
+          await page.waitForTimeout(5000);
+          const oSelectors = ['[role="listbox"]', '[data-testid="MailList"]', '.customScrollBar', '[aria-label*="Message list"]', '[role="main"]'];
+          for (const sel of oSelectors) {
+            try { await page.waitForSelector(sel, { timeout: 15000 }); break; } catch { /* next */ }
+          }
+          await page.waitForTimeout(2000);
+
+        } else {
+          // xero, custom, generic
+          await page.waitForTimeout(3000);
+        }
+
+        console.log('    ✓ Page loaded');
+        await page.screenshot({ path: ssPath, fullPage: false });
+        console.log('    ✓ Screenshot saved');
+        captured = true;
+      } catch (err) {
+        console.log(`    ✗ Capture failed: ${err.message}`);
+        console.log(`    → Creating placeholder instead`);
+      }
+
+      if (captured) {
+        slides.push({
+          id: slideId++,
+          platform,
+          type: 'platform',
+          placeholder: false,
+          connectorName: conn.name,
+          screenshot: ssPath,
+          clip: null,
+          prompt: null,
+          callout: null,
+        });
+      } else {
+        slides.push({
+          id: slideId++,
+          platform,
+          type: 'platform',
+          placeholder: true,
+          connectorName: conn.name,
+          screenshot: null,
+          clip: null,
+          prompt: null,
+          callout: null,
+          placeholderInfo: null,
+        });
+      }
+    } else {
+      // ── No URL — placeholder slide ──
+      console.log(`  ● Slide ${slideId} — ${displayName}`);
+      slides.push({
+        id: slideId++,
+        platform,
+        type: 'platform',
+        placeholder: true,
+        connectorName: conn.name,
+        screenshot: null,
+        clip: null,
+        prompt: null,
+        callout: null,
+        placeholderInfo: null,
+      });
+      console.log(`    → Placeholder (needs manual screenshot)`);
+    }
+    console.log('');
   }
 
   // ── Capture M365 Copilot agent interaction slides ──
+  console.log('  ● Capturing M365 Copilot...\n');
   console.log('  ● Opening M365 Copilot...');
   try {
     await maximizeWindow(page);
@@ -1438,6 +1555,26 @@ function generatePlaceholderGuide(slides, agentName, demoDir, slug, connectionEv
 // ───────────────────────────────────────────
 
 function generateDemoHTML(slides, agentName, description, m365Url, brandColor = '#00C9A7') {
+  // Platform display names and accent colors for browser chrome
+  const PLAT_NAMES = {
+    'm365-copilot': 'Microsoft 365 Copilot',
+    'sharepoint': 'SharePoint',
+    'power-automate': 'Power Automate',
+    'teams': 'Microsoft Teams',
+    'outlook': 'Outlook',
+    'xero': 'Xero',
+    'custom': 'Custom Platform',
+  };
+  const PLAT_COLORS = {
+    'm365-copilot': '#0078D4',
+    'sharepoint': '#036C70',
+    'power-automate': '#0066FF',
+    'teams': '#5558AF',
+    'outlook': '#0072C6',
+    'xero': '#13B5EA',
+    'custom': brandColor,
+  };
+
   // Build slides data for the HTML
   const slidesData = [];
 
@@ -1466,6 +1603,8 @@ function generateDemoHTML(slides, agentName, description, m365Url, brandColor = 
     slidesData.push({
       type: slide.type,
       platform: slide.platform,
+      platformName: PLAT_NAMES[slide.platform] || slide.platform,
+      platformColor: PLAT_COLORS[slide.platform] || brandColor,
       prompt: slide.prompt || '',
       screenshot: screenshotBase64,
       placeholder: isPlaceholder,
@@ -1637,10 +1776,13 @@ function render() {
     return;
   }
 
-  // Content slide
-  let html = '<div class="browser-frame"><div class="browser-toolbar">' +
+  // Content slide — platform-colored top border + display name in URL bar
+  var platColor = s.platformColor || '${brandColor}';
+  var platName = s.platformName || s.platform;
+  let html = '<div class="browser-frame" style="border-top: 3px solid ' + platColor + ';">' +
+    '<div class="browser-toolbar">' +
     '<div class="browser-dots"><span></span><span></span><span></span></div>' +
-    '<div class="browser-url">' + esc(s.platform) + '</div></div>' +
+    '<div class="browser-url"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + platColor + ';margin-right:8px;"></span>' + esc(platName) + '</div></div>' +
     '<div class="browser-content">';
 
   if (s.placeholder) {
@@ -1745,30 +1887,34 @@ export async function runCreate(opts) {
     // STEP 2: Auto-discover from Copilot Studio
     discovered = await discoverFromStudio(activePage, studioUrl);
 
-    // Apply pre-fill overrides from opts (MCP mode or CLI flags)
-    if (opts.agentName) discovered.name = opts.agentName;
-    if (opts.instructions) discovered.instructions = opts.instructions;
-    if (opts.platforms) {
-      const prefilled = opts.platforms.split(',').map(p => p.trim().toLowerCase()).filter(Boolean);
-      for (const p of prefilled) {
-        if (!discovered.connections.some(c => c.platform === p)) {
-          discovered.connections.push({ name: p, platform: p });
+    // If discovery returned nothing useful, use opts overrides or ask user for manual input
+    // Close browser first so readline works on MINGW64
+    if (discovered.name === 'My Agent' || (discovered.topics.length === 0 && discovered.connections.length === 0)) {
+      // Apply MCP-supplied overrides before potentially asking user
+      if (opts.agentName) discovered.name = opts.agentName;
+      if (opts.instructions) discovered.instructions = opts.instructions;
+      if (opts.platforms) {
+        const platList = opts.platforms.split(',').map(p => p.trim().toLowerCase()).filter(Boolean);
+        for (const p of platList) {
+          if (!discovered.connections.some(c => c.platform === p)) {
+            discovered.connections.push({ name: p, platform: p });
+          }
         }
       }
-    }
 
-    // If discovery returned nothing useful, ask user for manual input
-    // Close browser first so readline works on MINGW64
-    const needsFallback = discovered.name === 'My Agent' || (discovered.topics.length === 0 && discovered.connections.length === 0);
-    if (needsFallback && opts.mcpMode) {
-      // In MCP mode we can't use readline — skip interactive fallback.
-      // Pre-fill values from opts are already applied above; proceed with what we have.
-      console.log('  ⚠ Auto-discovery returned limited data. Proceeding with pre-filled values.');
-    } else if (needsFallback) {
-      await activePage.close().catch(() => {});
-      await activeBrowser.close().catch(() => {});
-      await askManualFallback(discovered);
-      // Re-open browser for capture
+      // In MCP mode with opts provided, skip interactive fallback
+      const hasOverrides = opts.agentName || opts.instructions || opts.platforms;
+      if (!opts.mcpMode || !hasOverrides) {
+        await activePage.close().catch(() => {});
+        await activeBrowser.close().catch(() => {});
+        await askManualFallback(discovered);
+        // Re-open browser for capture
+      } else {
+        console.log(`  ✓ Using provided agent details: ${discovered.name}`);
+        await activePage.close().catch(() => {});
+        await activeBrowser.close().catch(() => {});
+      }
+
       const reopened = await createBrowserContext({ headless });
       const validAgain = await isSessionValid(reopened.context);
       if (!validAgain) {
@@ -1778,6 +1924,44 @@ export async function runCreate(opts) {
       }
       activeBrowser = reopened.browser;
       activePage = await reopened.context.newPage();
+    }
+
+    // STEP 2B: Attach platform URLs from CLI flags / MCP params
+    const PLATFORM_URL_MAP = {
+      'sharepoint':     opts.sharepointUrl,
+      'power-automate': opts.powerAutomateUrl,
+      'teams':          opts.teamsUrl,
+      'outlook':        opts.outlookUrl,
+      'xero':           opts.xeroUrl,
+    };
+
+    // Ensure --platforms flag adds connections (even outside the discovery-fallback block)
+    if (opts.platforms) {
+      const platList = opts.platforms.split(',').map(p => p.trim().toLowerCase()).filter(Boolean);
+      for (const p of platList) {
+        if (!discovered.connections.some(c => c.platform === p)) {
+          discovered.connections.push({ name: p, platform: p });
+        }
+      }
+    }
+
+    // Attach URLs to matching connections, or create the connection entry
+    for (const [platform, url] of Object.entries(PLATFORM_URL_MAP)) {
+      if (!url) continue;
+      const existing = discovered.connections.find(c => c.platform === platform);
+      if (existing) {
+        existing.url = url;
+      } else {
+        discovered.connections.push({ name: platform, platform, url });
+      }
+    }
+
+    // Handle --custom-url (variadic — can be string or array)
+    if (opts.customUrl) {
+      const customUrls = Array.isArray(opts.customUrl) ? opts.customUrl : [opts.customUrl];
+      for (let i = 0; i < customUrls.length; i++) {
+        discovered.connections.push({ name: `custom-${i + 1}`, platform: 'custom', url: customUrls[i] });
+      }
     }
 
     // STEP 2C: Generate demo prompts via AI (before capture)
@@ -1857,14 +2041,20 @@ export async function runCreate(opts) {
     // STEP 6: Summary
     const capturedSlides = slides.filter(s => s.screenshot && !s.placeholder);
     const placeholderSlides = slides.filter(s => s.placeholder);
+    const platformCaptured = capturedSlides.filter(s => s.type === 'platform');
+    const m365Captured = capturedSlides.filter(s => s.platform === 'm365-copilot');
     console.log('');
     console.log(`  ✓ Demo created: ${htmlPath}`);
     console.log('');
 
     console.log('  ────────────────────────────────');
-    if (capturedSlides.length > 0) {
-      console.log(`  ✓ ${capturedSlides.length} slides captured`);
+    if (platformCaptured.length > 0) {
+      console.log(`  ✓ ${platformCaptured.length} platform slides captured`);
     }
+    if (m365Captured.length > 0) {
+      console.log(`  ✓ ${m365Captured.length} M365 Copilot slides captured`);
+    }
+    console.log(`  ✓ ${slides.length} total slides`);
 
     // Check for partial/needs-review slides
     const partialSlides = slides.filter(s => s.partial);

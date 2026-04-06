@@ -59,7 +59,31 @@ const TOOLS = [
         },
         platforms: {
           type: 'string',
-          description: 'Comma-separated list of platforms the agent connects to (e.g. "sharepoint,custom")',
+          description: 'Comma-separated list of platforms the agent connects to (e.g. "sharepoint,power-automate")',
+        },
+        sharepoint_url: {
+          type: 'string',
+          description: 'URL of the SharePoint list or site to capture',
+        },
+        power_automate_url: {
+          type: 'string',
+          description: 'URL of the Power Automate cloud flows page to capture',
+        },
+        teams_url: {
+          type: 'string',
+          description: 'URL of the Teams channel to capture',
+        },
+        outlook_url: {
+          type: 'string',
+          description: 'URL of the Outlook email or folder to capture',
+        },
+        xero_url: {
+          type: 'string',
+          description: 'URL of the Xero page to capture',
+        },
+        custom_urls: {
+          type: 'string',
+          description: 'Comma-separated URLs for custom platform captures',
         },
         slug: {
           type: 'string',
@@ -139,11 +163,18 @@ const TOOLS = [
 // ── Tool handlers ─────────────────────────────────────────────────────────────
 
 async function handleCreateDemo(args) {
-  const { studio_url, m365_url, agent_name, instructions, platforms, slug, headless = false } = args;
+  const {
+    studio_url, m365_url, agent_name, instructions, platforms,
+    sharepoint_url, power_automate_url, teams_url, outlook_url, xero_url, custom_urls,
+    slug, headless = false,
+  } = args;
 
   if (!studio_url || !m365_url) {
     return { error: 'studio_url and m365_url are required' };
   }
+
+  // Convert custom_urls CSV string into array for runCreate
+  const customUrlArr = custom_urls ? custom_urls.split(',').map(u => u.trim()).filter(Boolean) : undefined;
 
   try {
     await runCreate({
@@ -152,9 +183,14 @@ async function handleCreateDemo(args) {
       agentName: agent_name || undefined,
       instructions: instructions || undefined,
       platforms: platforms || undefined,
+      sharepointUrl: sharepoint_url || undefined,
+      powerAutomateUrl: power_automate_url || undefined,
+      teamsUrl: teams_url || undefined,
+      outlookUrl: outlook_url || undefined,
+      xeroUrl: xero_url || undefined,
+      customUrl: customUrlArr,
       slug: slug || undefined,
       headless,
-      // MCP mode: disable interactive readline prompts
       mcpMode: true,
     });
 
