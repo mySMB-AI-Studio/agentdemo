@@ -350,6 +350,40 @@ async function discoverFromStudio(page, studioUrl) {
     });
     discovered.description = descr;
 
+    // Read agent instructions from Overview tab
+    // Instructions live in a textarea or large text region labelled "Instructions"
+    const instrText = await page.evaluate(() => {
+      // Try labelled textarea first
+      for (const label of document.querySelectorAll('label, [class*="label" i], legend')) {
+        const text = label.textContent?.trim()?.toLowerCase() || '';
+        if (text.includes('instruction')) {
+          // Look for associated input/textarea via for= or sibling
+          const forId = label.getAttribute('for');
+          if (forId) {
+            const el = document.getElementById(forId);
+            if (el) return (el.value || el.textContent || '').trim().substring(0, 2000);
+          }
+          // Try next sibling or parent's textarea
+          const parent = label.closest('[class*="field" i], [class*="section" i], div') || label.parentElement;
+          if (parent) {
+            const ta = parent.querySelector('textarea, [contenteditable="true"], [class*="editor" i]');
+            if (ta) return (ta.value || ta.textContent || '').trim().substring(0, 2000);
+          }
+        }
+      }
+      // Fallback: any large textarea on the page (likely the instructions field)
+      const allTa = document.querySelectorAll('textarea, [contenteditable="true"]');
+      for (const ta of allTa) {
+        const val = (ta.value || ta.textContent || '').trim();
+        if (val.length > 50) return val.substring(0, 2000);
+      }
+      return '';
+    });
+    if (instrText) {
+      discovered.instructions = instrText;
+      console.log(`  ✓ Agent instructions read (${instrText.length} chars)`);
+    }
+
     // Navigate to Topics tab
     await dismissPopups(page); // dismiss any popup that appeared after page load
     const topicsClicked = await clickFirst(page, [
@@ -365,7 +399,7 @@ async function discoverFromStudio(page, studioUrl) {
         const found = [];
         const rows = document.querySelectorAll('[data-testid*="topic"], [role="row"], tr');
         for (const row of rows) {
-          const cells = row.querySelectorAll('[role="gridcell"], td, > div');
+          const cells = row.querySelectorAll('[role="gridcell"], td, div');
           if (cells.length === 0) continue;
           const name = cells[0]?.getAttribute('title') || cells[0]?.textContent?.trim()?.split('\n')[0]?.trim();
           if (!name || name.length < 2 || name.length > 100) continue;
@@ -615,7 +649,7 @@ Respond in JSON only, no markdown:
       return result;
     }
   } catch (err) {
-    console.log(`    ⚠ Script generation failed: ${err.message?.substring(0, 60)}`);
+    console.log(`    ⚠ Script generation failed: ${err.message}`);
   }
 
   return null;
@@ -1479,7 +1513,7 @@ async function generateCallouts(slides, agentName, description) {
       const platformLabel = slide.platform === 'm365-copilot' ? 'M365 Copilot (agent chat)' : slide.platform;
 
       const response = await client.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-6',
         max_tokens: 300,
         messages: [{
           role: 'user',
@@ -1574,7 +1608,7 @@ async function generatePlaceholderInfo(slides, agentName, description) {
   for (const slide of placeholders) {
     try {
       const response = await client.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-6',
         max_tokens: 400,
         messages: [{
           role: 'user',
