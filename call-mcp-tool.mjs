@@ -7,14 +7,9 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const args = {
-  studio_url: "https://copilotstudio.preview.microsoft.com/environments/f40f796d-2796-ec31-9125-3d11d482dbce/bots/9af8bed6-8bf5-f011-8406-002248e43f6d/overview",
-  m365_url: "https://m365.cloud.microsoft/chat/agent/T_9a071d6e-1cee-ac21-6c77-8aebe7ea9e0a.dcc03f21-a85a-40cb-a80d-3659680efa58?auth=2",
-  agent_name: "Humanitix Event Attendance Agent",
-  instructions: "You are an event automation specialist that retrieves event, ticket, order and attendance data from Humanitix. List the events first and proceed with creating prompts for the event called Test AI Workshop.",
-  platforms: "custom",
-  headless: true,
-};
+// Read tool name and args from command line: node call-mcp-tool.mjs <tool_name> '<json_args>'
+const toolName = process.argv[2] || 'create_demo';
+const args = process.argv[3] ? JSON.parse(process.argv[3]) : {};
 
 const server = spawn('node', ['src/mcp-server.js'], {
   cwd: __dirname,
@@ -43,7 +38,7 @@ function processLine(line) {
         id: 2,
         method: 'tools/call',
         params: {
-          name: 'create_demo',
+          name: toolName,
           arguments: args,
         },
       }) + '\n';

@@ -194,11 +194,16 @@ async function handleCreateDemo(args) {
       mcpMode: true,
     });
 
-    // Find the output after create
+    // Derive the expected slug the same way create.js does, then find that demo.
+    // Fallback order: explicit slug arg → slugify(agent_name) → most-recently-modified demo.
+    let expectedSlug = slug;
+    if (!expectedSlug && agent_name) {
+      expectedSlug = agent_name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    }
     const demos = getDemoList();
-    const created = demos.find(d =>
-      slug ? d.slug === slug : d.screenshots > 0
-    );
+    const created = expectedSlug
+      ? demos.find(d => d.slug === expectedSlug)
+      : demos.sort((a, b) => (b.last_updated || '').localeCompare(a.last_updated || ''))[0];
 
     return {
       success: true,

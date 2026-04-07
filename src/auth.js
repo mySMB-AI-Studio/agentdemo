@@ -92,6 +92,23 @@ export async function performLogin(context) {
     await checkPage.waitForTimeout(3000);
     const checkUrl = checkPage.url();
     if (!checkUrl.includes('login.microsoftonline.com') && !checkUrl.includes('login.live.com')) {
+      // Also warm up Studio so its cookies are included in the saved session
+      console.log('  Warming up Copilot Studio session...');
+      try {
+        await checkPage.goto('https://copilotstudio.microsoft.com', {
+          waitUntil: 'domcontentloaded',
+          timeout: 60000,
+        });
+        await checkPage.waitForTimeout(5000);
+        const studioUrl = checkPage.url();
+        if (!studioUrl.includes('login.microsoftonline.com') && !studioUrl.includes('login.live.com')) {
+          console.log('  ✓ Copilot Studio session established.');
+        } else {
+          console.log('  ⚠ Copilot Studio redirected to login — Studio access may not be available for this account.');
+        }
+      } catch {
+        console.log('  ⚠ Could not reach Copilot Studio during auth (non-fatal).');
+      }
       await checkPage.close();
       await saveSession(context);
       console.log(`✓ Already logged in as ${email} — session saved.`);
@@ -185,6 +202,25 @@ export async function performLogin(context) {
   const currentUrl = page.url();
   if (currentUrl.includes('login.microsoftonline.com')) {
     throw new Error('Login did not complete successfully. Check credentials and try again.');
+  }
+
+  // Warm up the Copilot Studio domain so its session cookies are captured.
+  // Without this, Studio may redirect to login even when M365 session is valid.
+  console.log('  Warming up Copilot Studio session...');
+  try {
+    await page.goto('https://copilotstudio.microsoft.com', {
+      waitUntil: 'domcontentloaded',
+      timeout: 60000,
+    });
+    await page.waitForTimeout(5000);
+    const studioUrl = page.url();
+    if (!studioUrl.includes('login.microsoftonline.com') && !studioUrl.includes('login.live.com')) {
+      console.log('  ✓ Copilot Studio session established.');
+    } else {
+      console.log('  ⚠ Copilot Studio redirected to login — Studio access may not be available for this account.');
+    }
+  } catch {
+    console.log('  ⚠ Could not reach Copilot Studio during auth (non-fatal).');
   }
 
   await saveSession(context);
