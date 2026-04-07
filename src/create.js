@@ -1566,9 +1566,17 @@ where x and y are percentages (0-100) indicating where the arrow should point.`,
       });
 
       const jsonStr = response.content[0]?.text || '';
-      // Parse JSON from response (handle markdown code blocks)
-      const cleaned = jsonStr.replace(/```json?\s*/g, '').replace(/```/g, '').trim();
-      const parsed = JSON.parse(cleaned);
+      // Parse JSON from response — strip markdown fences, then extract first {...} if needed
+      const stripped = jsonStr.replace(/```json?\s*/g, '').replace(/```/g, '').trim();
+      let parsed;
+      try {
+        parsed = JSON.parse(stripped);
+      } catch {
+        // Model may have included prose before/after the JSON object — extract it
+        const match = stripped.match(/\{[\s\S]*\}/);
+        if (!match) throw new Error(`No JSON object in response: ${stripped.substring(0, 80)}`);
+        parsed = JSON.parse(match[0]);
+      }
       slide.callout = {
         text: parsed.text || '',
         position: parsed.position || 'bottom-right',
