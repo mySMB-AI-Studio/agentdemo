@@ -396,17 +396,34 @@ async function discoverFromStudio(page, studioUrl) {
 
       // Read topics and trigger phrases
       const topics = await page.evaluate(() => {
+        const SKIP = new Set([
+          'name', 'status', 'triggers', 'type', 'modified', 'author', 'actions',
+          'greeting', 'goodbye', 'escalate', 'fallback', 'start over',
+          'on', 'off', 'enabled', 'disabled', 'system', 'custom',
+        ]);
         const found = [];
         const rows = document.querySelectorAll('[data-testid*="topic"], [role="row"], tr');
         for (const row of rows) {
-          const cells = row.querySelectorAll('[role="gridcell"], td, div');
+          // Prefer real table/grid cells over generic divs
+          let cells = row.querySelectorAll('[role="gridcell"], td');
+          if (cells.length === 0) cells = row.querySelectorAll('div');
           if (cells.length === 0) continue;
-          const name = cells[0]?.getAttribute('title') || cells[0]?.textContent?.trim()?.split('\n')[0]?.trim();
-          if (!name || name.length < 2 || name.length > 100) continue;
+
+          // Try title attribute first (most reliable in Studio), then text content
+          const firstCell = cells[0];
+          const titleAttr = firstCell?.getAttribute('title')?.trim();
+          const textContent = firstCell?.textContent?.trim()?.split('\n')[0]?.trim();
+          const name = (titleAttr && titleAttr.length > 2) ? titleAttr : textContent;
+
+          if (!name || name.length < 3 || name.length > 100) continue;
           const lower = name.toLowerCase();
+          // Skip known UI labels, system topics, single common words
+          if (SKIP.has(lower)) continue;
           if (lower.includes('greeting') || lower.includes('goodbye') ||
               lower.includes('escalate') || lower.includes('fallback') ||
-              lower.includes('start over') || lower === 'name' || lower === 'status') continue;
+              lower.includes('start over') || lower.includes('the agent')) continue;
+          // Skip if it looks like a sentence fragment or UI label (starts with article/verb)
+          if (/^(the |a |an |is |are |to |for |in |on |at |by |with |this |that )/i.test(name)) continue;
           found.push({ name, phrases: [] });
         }
         return found;

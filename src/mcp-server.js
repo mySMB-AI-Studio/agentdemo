@@ -4,16 +4,16 @@
  */
 
 import { createRequire } from 'module';
+import { fileURLToPath as _fileURLToPath } from 'url';
 const require = createRequire(import.meta.url);
 const dotenv = require('dotenv');
 const path = require('path');
 
-// Load .env from agentdemo root folder
-dotenv.config({
-  path: path.resolve(path.dirname(
-    new URL(import.meta.url).pathname
-  ), '../.env')
-});
+// Load .env from agentdemo root folder.
+// Use fileURLToPath so that URL-encoded spaces (%20) in the path are decoded
+// correctly on Windows — new URL(import.meta.url).pathname leaves them encoded.
+const __mcpDir = path.dirname(_fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(__mcpDir, '../.env') });
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
