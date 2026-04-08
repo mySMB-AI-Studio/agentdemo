@@ -2435,6 +2435,25 @@ export async function runPlan(opts = {}) {
     });
   }
 
+  // Also catch platforms that appear in AI-generated script steps (capture_platform_after)
+  // but were NOT in discovered.connections — these won't be caught by the loop above.
+  for (const slide of plannedSlides) {
+    if (slide.type !== 'platform-after-action' && slide.type !== 'platform-initial') continue;
+    if (slide.automated) continue; // already has a URL
+    const meta = PLATFORM_PARAM_MAP[slide.platform];
+    if (!meta) continue;
+    const alreadyListed = missingInputs.some(m => m.param === meta.param);
+    if (!alreadyListed) {
+      missingInputs.push({
+        param: meta.param,
+        label: meta.label,
+        reason: `${meta.reason} — the demo script writes to or reads from this platform`,
+        required: slide.type === 'platform-after-action',
+        can_skip: true,
+      });
+    }
+  }
+
   // Check for approval-loop pattern → suggest recipient inbox
   const combinedText = `${discovered.instructions} ${steps.map(s => s.prompt).join(' ')}`.toLowerCase();
   const hasApprovalLoop = combinedText.includes('confirm') && (combinedText.includes('email') || combinedText.includes('volunteer') || combinedText.includes('recipient'));
