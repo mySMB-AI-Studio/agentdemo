@@ -23,7 +23,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { runCreate } from './create.js';
+import { runCreate, runPlan } from './create.js';
 import { runGenerate } from './generate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -32,6 +32,31 @@ const DEMOS_DIR = path.join(__dirname, '..', 'demos');
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
 const TOOLS = [
+  {
+    name: 'plan_demo',
+    description:
+      'Plan a demo without capturing anything. Runs Copilot Studio discovery and AI script generation, ' +
+      'then returns the planned slide list, the conversation script, and a list of any missing inputs ' +
+      '(platform URLs, auth sessions) needed before create_demo can run. ' +
+      'Use this BEFORE create_demo to validate the approach and identify what to collect from the user.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        studio_url: { type: 'string', description: 'Copilot Studio agent URL' },
+        m365_url: { type: 'string', description: 'M365 Copilot chat URL where the agent is published' },
+        agent_name: { type: 'string', description: 'Agent name override if Studio discovery is unavailable' },
+        instructions: { type: 'string', description: 'Agent instructions override' },
+        platforms: { type: 'string', description: 'Comma-separated list of platforms the agent connects to' },
+        sharepoint_url: { type: 'string', description: 'SharePoint URL if already known' },
+        power_automate_url: { type: 'string', description: 'Power Automate URL if already known' },
+        teams_url: { type: 'string', description: 'Teams URL if already known' },
+        outlook_url: { type: 'string', description: 'Outlook URL if already known' },
+        xero_url: { type: 'string', description: 'Xero URL if already known' },
+        headless: { type: 'boolean', description: 'Run browser in headless mode (default: true)', default: true },
+      },
+      required: ['studio_url', 'm365_url'],
+    },
+  },
   {
     name: 'create_demo',
     description:
@@ -161,6 +186,36 @@ const TOOLS = [
 ];
 
 // ── Tool handlers ─────────────────────────────────────────────────────────────
+
+async function handlePlanDemo(args) {
+  const {
+    studio_url, m365_url, agent_name, instructions, platforms,
+    sharepoint_url, power_automate_url, teams_url, outlook_url, xero_url,
+    headless = true,
+  } = args;
+
+  if (!studio_url || !m365_url) {
+    return { error: 'studio_url and m365_url are required' };
+  }
+
+  try {
+    return await runPlan({
+      studioUrl: studio_url,
+      m365Url: m365_url,
+      agentName: agent_name || undefined,
+      instructions: instructions || undefined,
+      platforms: platforms || undefined,
+      sharepointUrl: sharepoint_url || undefined,
+      powerAutomateUrl: power_automate_url || undefined,
+      teamsUrl: teams_url || undefined,
+      outlookUrl: outlook_url || undefined,
+      xeroUrl: xero_url || undefined,
+      headless,
+    });
+  } catch (err) {
+    return { error: err.message };
+  }
+}
 
 async function handleCreateDemo(args) {
   const {
@@ -387,6 +442,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   let result;
   switch (name) {
+    case 'plan_demo':         result = await handlePlanDemo(args); break;
     case 'create_demo':       result = await handleCreateDemo(args); break;
     case 'get_demo_status':   result = await handleGetDemoStatus(args); break;
     case 'resume_demo':       result = await handleResumeDemo(args); break;

@@ -2293,3 +2293,179 @@ export async function runCreate(opts) {
     await activeBrowser.close().catch(() => {});
   }
 }
+
+// ───────────────────────────────────────────
+// Plan: discover + script, no capture
+// ───────────────────────────────────────────
+
+const PLATFORM_PARAM_MAP = {
+  'sharepoint':     { param: 'sharepoint_url',     label: 'SharePoint',     reason: 'URL of the SharePoint list or site the agent queries' },
+  'power-automate': { param: 'power_automate_url', label: 'Power Automate', reason: 'URL of the Power Automate flow run history page' },
+  'teams':          { param: 'teams_url',           label: 'Teams',          reason: 'URL of the Teams channel where the agent posts messages' },
+  'outlook':        { param: 'outlook_url',         label: 'Outlook',        reason: 'URL of the Outlook inbox or folder the agent reads from or writes to' },
+  'xero':           { param: 'xero_url',            label: 'Xero',           reason: 'URL of the Xero page the agent accesses' },
+};
+
+export async function runPlan(opts = {}) {
+  const {
+    studioUrl, m365Url,
+    agentName: agentNameOverride, instructions: instructionsOverride, platforms,
+    sharepointUrl, powerAutomateUrl, teamsUrl, outlookUrl, xeroUrl,
+    headless = true,
+  } = opts;
+
+  console.log('  ● Planning demo (discovery only — no capture)...');
+
+  // Launch browser for Studio discovery
+  const { browser, context } = await createBrowserContext({ headless });
+  const valid = await isSessionValid(context);
+  if (!valid) {
+    await browser.close();
+    return { error: 'Session expired. Run: agentdemo auth' };
+  }
+
+  const page = await context.newPage();
+
+  let discovered = {
+    name: agentNameOverride || 'My Agent',
+    description: '',
+    instructions: instructionsOverride || '',
+    topics: [],
+    connections: [],
+  };
+
+  try {
+    try {
+      discovered = await discoverFromStudio(page, studioUrl);
+    } catch (err) {
+      console.log(`  ⚠ Studio discovery failed: ${err.message}`);
+    }
+
+    // Apply overrides
+    if (agentNameOverride) discovered.name = agentNameOverride;
+    if (instructionsOverride) discovered.instructions = instructionsOverride;
+
+    // Merge explicit platforms
+    if (platforms) {
+      for (const p of platforms.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)) {
+        if (!discovered.connections.some(c => c.platform === p)) {
+          discovered.connections.push({ name: p, platform: p });
+        }
+      }
+    }
+
+    // Attach any already-provided URLs so the script generator knows what's available
+    const PROVIDED_URLS = { sharepoint: sharepointUrl, 'power-automate': powerAutomateUrl, teams: teamsUrl, outlook: outlookUrl, xero: xeroUrl };
+    for (const [platform, url] of Object.entries(PROVIDED_URLS)) {
+      if (!url) continue;
+      const existing = discovered.connections.find(c => c.platform === platform);
+      if (existing) existing.url = url;
+      else discovered.connections.push({ name: platform, platform, url });
+    }
+
+  } finally {
+    await page.close().catch(() => {});
+    await browser.close().catch(() => {});
+  }
+
+  // Generate AI conversation script (no browser needed)
+  console.log('  ● Generating conversation script...');
+  const generatedScript = await generateDemoScript(discovered);
+
+  // ── Build planned slide list ──────────────────────────────────────────────
+  const plannedSlides = [];
+  let order = 1;
+
+  plannedSlides.push({ order: order++, type: 'welcome', label: 'Agent welcome screen', platform: 'm365-copilot', automated: true });
+
+  // Initial platform captures (before conversation)
+  for (const conn of discovered.connections) {
+    const meta = PLATFORM_PARAM_MAP[conn.platform] || { label: conn.platform };
+    plannedSlides.push({
+      order: order++,
+      type: 'platform-initial',
+      label: `${meta.label} — initial state`,
+      platform: conn.platform,
+      automated: !!conn.url,
+    });
+  }
+
+  // Conversation steps + any mid/post-action platform captures
+  const steps = generatedScript?.steps || [];
+  for (const step of steps) {
+    plannedSlides.push({
+      order: order++,
+      type: 'conversation',
+      label: step.slide_label || step.prompt.substring(0, 60),
+      platform: 'm365-copilot',
+      prompt: step.prompt,
+      extracts_entity: step.extract_entity || false,
+      automated: true,
+    });
+    if (step.capture_platform_after) {
+      const meta = PLATFORM_PARAM_MAP[step.capture_platform_after] || { label: step.capture_platform_after };
+      const conn = discovered.connections.find(c => c.platform === step.capture_platform_after);
+      plannedSlides.push({
+        order: order++,
+        type: 'platform-after-action',
+        label: `${meta.label} — after action`,
+        platform: step.capture_platform_after,
+        automated: !!(conn?.url),
+      });
+    }
+  }
+
+  // ── Identify missing inputs ───────────────────────────────────────────────
+  const PROVIDED = { sharepoint: !!sharepointUrl, 'power-automate': !!powerAutomateUrl, teams: !!teamsUrl, outlook: !!outlookUrl, xero: !!xeroUrl };
+  const missingInputs = [];
+
+  for (const conn of discovered.connections) {
+    const meta = PLATFORM_PARAM_MAP[conn.platform];
+    if (!meta || PROVIDED[conn.platform]) continue;
+
+    // A platform is "required" if it appears in a post-action capture (i.e. the demo
+    // depends on showing a change there) — otherwise it's nice-to-have.
+    const isPostAction = plannedSlides.some(s => s.platform === conn.platform && s.type === 'platform-after-action');
+    missingInputs.push({
+      param: meta.param,
+      label: meta.label,
+      reason: meta.reason,
+      required: isPostAction,
+      can_skip: true,
+    });
+  }
+
+  // Check for approval-loop pattern → suggest recipient inbox
+  const combinedText = `${discovered.instructions} ${steps.map(s => s.prompt).join(' ')}`.toLowerCase();
+  const hasApprovalLoop = combinedText.includes('confirm') && (combinedText.includes('email') || combinedText.includes('volunteer') || combinedText.includes('recipient'));
+  if (hasApprovalLoop && !outlookUrl) {
+    const alreadyListed = missingInputs.some(m => m.param === 'outlook_url');
+    missingInputs.push({
+      param: alreadyListed ? 'outlook_recipient_url' : 'outlook_url',
+      label: alreadyListed ? 'Recipient Outlook inbox' : 'Outlook',
+      reason: 'Agent sends emails awaiting a response — capturing the recipient\'s inbox completes the story',
+      required: false,
+      can_skip: true,
+      note: 'Requires a saved session for the recipient account. Run: agentdemo auth --profile recipient',
+    });
+  }
+
+  return {
+    agent: {
+      name: discovered.name,
+      description: discovered.description || null,
+      instructions_found: !!(discovered.instructions),
+      topics_found: discovered.topics.length,
+      connections_found: discovered.connections.map(c => c.platform),
+    },
+    script_generated: !!generatedScript,
+    hook: generatedScript?.hook || null,
+    planned_slides: plannedSlides,
+    slide_count: plannedSlides.length,
+    missing_inputs: missingInputs,
+    ready_to_capture: missingInputs.filter(m => m.required).length === 0,
+    note: missingInputs.length > 0
+      ? `${missingInputs.filter(m => m.required).length} required input(s) missing. ${missingInputs.filter(m => !m.required && m.can_skip).length} optional input(s) can be skipped.`
+      : 'All inputs present — ready to run create_demo.',
+  };
+}
