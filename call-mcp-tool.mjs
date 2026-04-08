@@ -99,9 +99,9 @@ const initRequest = JSON.stringify({
 
 server.stdin.write(initRequest);
 
-// Safety timeout: 10 minutes
+// Safety timeout: 30 minutes (captures + callout generation can take a while)
 setTimeout(() => {
-  console.log('\n[CLIENT] Timeout reached (10 min). Killing server.');
+  console.log('\n[CLIENT] Timeout reached (30 min). Killing server.');
   server.kill();
   process.exit(1);
-}, 600000);
+}, 1800000);
