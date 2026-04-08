@@ -43,6 +43,7 @@ program
   .description('Manage demo account session')
   .option('--status', 'Print current session status')
   .option('--verify-copilot', 'Verify M365 Copilot is accessible')
+  .option('--profile <name>', 'Save session under a named profile (e.g. "sean") for multi-account demos')
   .action(async (opts) => {
     const { runAuth } = await import('./src/auth.js');
     await runAuth(opts);
