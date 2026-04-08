@@ -944,7 +944,7 @@ async function detectConnectionRequest(page) {
 }
 
 /** Pause and show connection approval instructions */
-async function handleConnectionRequest(page, platform, slideId, screenshotsDir) {
+async function handleConnectionRequest(page, platform, slideId, screenshotsDir, headless = false) {
   // 1. Screenshot the connection request (browser stays OPEN)
   const ssPath = path.join(screenshotsDir, `${slideId}-connection-request.png`);
   await page.screenshot({ path: ssPath }).catch(() => {});
@@ -991,20 +991,40 @@ async function handleConnectionRequest(page, platform, slideId, screenshotsDir) 
 
   const displayPlatform = detectedName || platform || 'your connected platform';
 
-  // 3. Print pause message — browser is still open and visible
+  // 3. Print pause message
   console.log('');
-  console.log('  ┌─────────────────────────────────────────────┐');
-  console.log('  │  ⚠ CONNECTION APPROVAL REQUIRED             │');
-  console.log('  │                                             │');
-  console.log(`  │  The agent needs you to approve a           │`);
-  console.log(`  │  connection to: ${displayPlatform.substring(0, 27).padEnd(27)}│`);
-  console.log('  │                                             │');
-  console.log('  │  Steps:                                     │');
-  console.log('  │  1. Look at the browser window              │');
-  console.log('  │  2. Click "Connect" or follow the link      │');
-  console.log('  │  3. Complete the authorization flow         │');
-  console.log('  │  4. Return here and press Enter to retry    │');
-  console.log('  └─────────────────────────────────────────────┘');
+  if (headless) {
+    // In headless mode the user can't see or interact with the browser window
+    console.log('  ┌──────────────────────────────────────────────────────────────┐');
+    console.log('  │  ⚠ CONNECTION APPROVAL REQUIRED (headless mode)              │');
+    console.log('  │                                                              │');
+    console.log(`  │  The agent needs a connection approval to:                   │`);
+    console.log(`  │  ${displayPlatform.substring(0, 60).padEnd(60)}│`);
+    console.log('  │                                                              │');
+    console.log('  │  This cannot be done in headless mode. Choose one option:    │');
+    console.log('  │                                                              │');
+    console.log('  │  Option 1: Re-run create_demo with headless: false           │');
+    console.log('  │            This opens a visible browser so you can approve.  │');
+    console.log('  │                                                              │');
+    console.log('  │  Option 2: In a separate terminal run:                       │');
+    console.log('  │    agentdemo auth --approve-connections --m365-url <url>     │');
+    console.log('  │    Approve the connection there, then press Enter here.      │');
+    console.log('  │                                                              │');
+    console.log('  └──────────────────────────────────────────────────────────────┘');
+  } else {
+    console.log('  ┌─────────────────────────────────────────────┐');
+    console.log('  │  ⚠ CONNECTION APPROVAL REQUIRED             │');
+    console.log('  │                                             │');
+    console.log(`  │  The agent needs you to approve a           │`);
+    console.log(`  │  connection to: ${displayPlatform.substring(0, 27).padEnd(27)}│`);
+    console.log('  │                                             │');
+    console.log('  │  Steps:                                     │');
+    console.log('  │  1. Look at the browser window              │');
+    console.log('  │  2. Click "Connect" or follow the link      │');
+    console.log('  │  3. Complete the authorization flow         │');
+    console.log('  │  4. Return here and press Enter to retry    │');
+    console.log('  └─────────────────────────────────────────────┘');
+  }
 
   // 4. BLOCKING WAIT — nothing runs until user presses Enter
   await waitForEnter('  Approve the connection in the browser, then:');
@@ -1013,7 +1033,94 @@ async function handleConnectionRequest(page, platform, slideId, screenshotsDir) 
   return { ssPath, platform: displayPlatform };
 }
 
-async function autoCapture(page, m365Url, discovered, demoDir, generatedScript = null) {
+/**
+ * Opens a separate browser context for the recipient/volunteer account,
+ * waits for a new email to appear in their Outlook inbox, and screenshots it.
+ * Returns the screenshot path, or null if the session is invalid or capture fails.
+ */
+async function captureRecipientInbox(recipientUrl, profile, slideId, screenshotsDir, discovered) {
+  console.log(`\n  ● Slide ${slideId} — Outlook inbox (recipient profile "${profile}")`);
+  let recipientBrowser, recipientContext;
+  try {
+    const opened = await createBrowserContext({ headless: true, profile });
+    recipientBrowser = opened.browser;
+    recipientContext = opened.context;
+  } catch (err) {
+    console.log(`    ⚠ Could not open recipient browser context: ${err.message}`);
+    return null;
+  }
+
+  const sessionOk = await isSessionValid(recipientContext);
+  if (!sessionOk) {
+    console.log(`    ⚠ Recipient session invalid for profile "${profile}". Run: agentdemo auth --profile ${profile}`);
+    await recipientBrowser.close().catch(() => {});
+    return null;
+  }
+
+  const ssPath = path.join(screenshotsDir, `${slideId}-outlook-recipient.png`);
+  let page;
+  try {
+    page = await recipientContext.newPage();
+    await page.goto(recipientUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.waitForLoadState('networkidle').catch(() => {});
+
+    if (page.url().includes('login.microsoftonline.com') || page.url().includes('login.live.com')) {
+      console.log(`    ⚠ Recipient session expired — redirected to login.`);
+      await page.close();
+      await recipientBrowser.close().catch(() => {});
+      return null;
+    }
+
+    // Poll up to 90s (every 5s) for a new email to appear at the top of the inbox
+    const EMAIL_SELECTORS = [
+      '[role="listbox"] [role="option"]',
+      '[role="list"] [role="listitem"]',
+      '[data-convid]',
+      '.ms-List-cell',
+    ];
+    const POLL_INTERVAL = 5000;
+    const POLL_TIMEOUT = 90000;
+    const pollStart = Date.now();
+    let emailFound = false;
+
+    console.log(`    Waiting up to 90s for email to arrive in recipient inbox...`);
+    while (!emailFound && (Date.now() - pollStart) < POLL_TIMEOUT) {
+      for (const sel of EMAIL_SELECTORS) {
+        try {
+          const el = await page.$(sel);
+          if (el) { emailFound = true; break; }
+        } catch { /* try next */ }
+      }
+      if (!emailFound) {
+        await page.waitForTimeout(POLL_INTERVAL);
+        // Refresh inbox view
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+        await page.waitForLoadState('networkidle').catch(() => {});
+      }
+    }
+
+    if (emailFound) {
+      console.log(`    ✓ Email detected in recipient inbox`);
+    } else {
+      console.log(`    ⚠ No email detected after 90s — screenshotting inbox anyway`);
+    }
+
+    await page.screenshot({ path: ssPath });
+    console.log(`    ✓ Recipient inbox screenshot saved`);
+    await page.close();
+  } catch (err) {
+    console.log(`    ⚠ Recipient inbox capture failed: ${err.message}`);
+    if (page) await page.close().catch(() => {});
+    await recipientBrowser.close().catch(() => {});
+    return null;
+  }
+
+  await recipientBrowser.close().catch(() => {});
+  return ssPath;
+}
+
+async function autoCapture(page, m365Url, discovered, demoDir, generatedScript = null, headless = false, captureOpts = {}) {
+  const { outlookRecipientUrl, outlookRecipientProfile = 'recipient' } = captureOpts;
   const screenshotsDir = path.join(demoDir, 'screenshots');
   const clipsDir = path.join(demoDir, 'clips');
   fs.mkdirSync(screenshotsDir, { recursive: true });
@@ -1221,7 +1328,7 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
       // Pre-check: detect connection requests on the welcome screen
       const preCheck = await detectConnectionRequest(page);
       if (preCheck.detected) {
-        const connResult = await handleConnectionRequest(page, preCheck.platform, 'pre', screenshotsDir);
+        const connResult = await handleConnectionRequest(page, preCheck.platform, 'pre', screenshotsDir, headless);
         connectionEvents.push({ platform: connResult.platform, screenshotPath: connResult.ssPath });
         await page.goto(m365Url, { waitUntil: 'domcontentloaded', timeout: 60000 });
         await page.waitForLoadState('networkidle').catch(() => {});
@@ -1369,7 +1476,7 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
           if (!result.complete && result.lastMsgText.length < 10) {
             const connCheck = await detectConnectionRequest(page);
             if (connCheck.detected) {
-              const connResult = await handleConnectionRequest(page, connCheck.platform, slideId, screenshotsDir);
+              const connResult = await handleConnectionRequest(page, connCheck.platform, slideId, screenshotsDir, headless);
               connectionEvents.push({ platform: connResult.platform, screenshotPath: connResult.ssPath });
               connectionDetected = true;
             }
@@ -1448,6 +1555,30 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
                 clip: null, prompt: null, callout: null,
                 storyLabel: `Result in ${displayName}`, placeholderInfo: null,
               });
+
+              // After a successful Outlook capture, also capture the recipient inbox if configured
+              if (capPlatform === 'outlook' && captured && outlookRecipientUrl) {
+                const recipientSsPath = await captureRecipientInbox(
+                  outlookRecipientUrl,
+                  outlookRecipientProfile,
+                  slideId,
+                  screenshotsDir,
+                  discovered,
+                );
+                if (recipientSsPath) {
+                  slides.push({
+                    id: slideId++,
+                    platform: 'outlook',
+                    type: 'platform',
+                    storyLabel: 'Volunteer receives notification',
+                    screenshot: recipientSsPath,
+                    clip: null,
+                    prompt: null,
+                    callout: null,
+                    placeholder: false,
+                  });
+                }
+              }
             } else {
               console.log(`    ⚠ capture_platform_after="${capPlatform}" — no URL, will mention in callout`);
               skippedPlatform = capPlatform;
@@ -2205,7 +2336,10 @@ export async function runCreate(opts) {
     fs.mkdirSync(outputDir, { recursive: true });
 
     // STEP 3: Auto-capture from M365 Copilot
-    const captureResult = await autoCapture(activePage, m365Url, discovered, demoDir, generatedScript);
+    const captureResult = await autoCapture(activePage, m365Url, discovered, demoDir, generatedScript, headless, {
+      outlookRecipientUrl: opts.outlookRecipientUrl,
+      outlookRecipientProfile: opts.outlookRecipientProfile,
+    });
     slides = captureResult.slides;
     const connectionEvents = captureResult.connectionEvents || [];
 

@@ -17,6 +17,36 @@ function ensureSessionDir() {
   }
 }
 
+/**
+ * Returns the state file path for a given profile name.
+ * - undefined / null / 'default' → .browser-session/state.json
+ * - 'sean' → .browser-session/state-sean.json
+ */
+function sessionFilePath(profile) {
+  if (!profile || profile === 'default') return STATE_FILE;
+  return path.join(SESSION_DIR, `state-${profile}.json`);
+}
+
+/**
+ * Returns an array of { profile, file } for all saved sessions.
+ */
+export function listSessions() {
+  if (!fs.existsSync(SESSION_DIR)) return [];
+  const entries = [];
+  // Default session
+  if (fs.existsSync(STATE_FILE)) {
+    entries.push({ profile: 'default', file: STATE_FILE });
+  }
+  // Named profiles: state-{profile}.json
+  for (const f of fs.readdirSync(SESSION_DIR)) {
+    const m = f.match(/^state-(.+)\.json$/);
+    if (m) {
+      entries.push({ profile: m[1], file: path.join(SESSION_DIR, f) });
+    }
+  }
+  return entries;
+}
+
 function waitForKeypress(message) {
   return new Promise((resolve) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -30,6 +60,7 @@ function waitForKeypress(message) {
 export async function createBrowserContext(options = {}) {
   ensureSessionDir();
   const isHeadless = options.headless ?? false;
+  const stateFile = sessionFilePath(options.profile);
   const launchOpts = {
     headless: isHeadless,
     channel: 'chromium',
@@ -43,8 +74,8 @@ export async function createBrowserContext(options = {}) {
     viewport: isHeadless ? { width: 1920, height: 1080 } : null,
   };
 
-  if (fs.existsSync(STATE_FILE)) {
-    contextOpts.storageState = STATE_FILE;
+  if (fs.existsSync(stateFile)) {
+    contextOpts.storageState = stateFile;
   }
 
   const browser = await chromium.launch(launchOpts);
@@ -52,9 +83,10 @@ export async function createBrowserContext(options = {}) {
   return { browser, context };
 }
 
-export async function saveSession(context) {
+export async function saveSession(context, profile) {
   ensureSessionDir();
-  await context.storageState({ path: STATE_FILE });
+  const stateFile = sessionFilePath(profile);
+  await context.storageState({ path: stateFile });
 }
 
 export async function isSessionValid(context) {
@@ -72,7 +104,7 @@ export async function isSessionValid(context) {
   }
 }
 
-export async function performLogin(context) {
+export async function performLogin(context, profile) {
   const email = process.env.DEMO_EMAIL;
   const password = process.env.DEMO_PASSWORD;
 
@@ -110,7 +142,7 @@ export async function performLogin(context) {
         console.log('  ⚠ Could not reach Copilot Studio during auth (non-fatal).');
       }
       await checkPage.close();
-      await saveSession(context);
+      await saveSession(context, profile);
       console.log(`✓ Already logged in as ${email} — session saved.`);
       return;
     }
@@ -223,7 +255,7 @@ export async function performLogin(context) {
     console.log('  ⚠ Could not reach Copilot Studio during auth (non-fatal).');
   }
 
-  await saveSession(context);
+  await saveSession(context, profile);
   await page.close();
   console.log(`✓ Session saved. You are logged in as ${email}`);
 }
@@ -272,43 +304,81 @@ export async function verifyCopilot(context) {
 }
 
 export async function runAuth(opts) {
+  const profile = opts.profile || null;
+  const stateFile = sessionFilePath(profile);
+  const profileLabel = profile && profile !== 'default' ? `profile "${profile}"` : 'default profile';
+
   if (opts.status) {
-    if (!fs.existsSync(STATE_FILE)) {
-      console.log('No session found. Run agentdemo auth to log in.');
+    const sessions = listSessions();
+    if (sessions.length === 0) {
+      console.log('No sessions found. Run agentdemo auth to log in.');
       return;
     }
-    const { browser, context } = await createBrowserContext({ headless: true });
-    const valid = await isSessionValid(context);
-    await browser.close();
-    if (valid) {
-      console.log(`✓ Session active for ${process.env.DEMO_EMAIL || '(unknown)'}`);
-    } else {
-      console.log('✗ Session expired. Run agentdemo auth to re-authenticate.');
+    // If a specific profile is requested, just check that one
+    const toCheck = profile
+      ? sessions.filter(s => s.profile === (profile === 'default' ? 'default' : profile))
+      : sessions;
+    for (const session of toCheck) {
+      if (!fs.existsSync(session.file)) {
+        console.log(`  ✗ No session file for profile "${session.profile}"`);
+        continue;
+      }
+      const { browser: cb, context: cc } = await createBrowserContext({ headless: true, profile: session.profile === 'default' ? null : session.profile });
+      const valid = await isSessionValid(cc);
+      await cb.close();
+      if (valid) {
+        console.log(`  ✓ Session active for profile "${session.profile}"`);
+      } else {
+        console.log(`  ✗ Session expired for profile "${session.profile}". Run: agentdemo auth${session.profile !== 'default' ? ` --profile ${session.profile}` : ''}`);
+      }
     }
     return;
   }
 
+  // Resolve credentials: for named profiles, check PROFILE_{NAME}_EMAIL / PROFILE_{NAME}_PASSWORD first
+  let email = process.env.DEMO_EMAIL;
+  let password = process.env.DEMO_PASSWORD;
+  if (profile && profile !== 'default') {
+    const envPrefix = `PROFILE_${profile.toUpperCase()}`;
+    if (process.env[`${envPrefix}_EMAIL`]) email = process.env[`${envPrefix}_EMAIL`];
+    if (process.env[`${envPrefix}_PASSWORD`]) password = process.env[`${envPrefix}_PASSWORD`];
+  }
+
   // Check if an existing session is still valid before opening the browser
-  if (fs.existsSync(STATE_FILE)) {
-    const { browser: checkBrowser, context: checkContext } = await createBrowserContext({ headless: true });
+  if (fs.existsSync(stateFile)) {
+    const { browser: checkBrowser, context: checkContext } = await createBrowserContext({ headless: true, profile });
     const valid = await isSessionValid(checkContext);
     await checkBrowser.close();
 
     if (valid && !opts.verifyCopilot) {
-      console.log(`✓ Existing session is valid for ${process.env.DEMO_EMAIL}`);
+      console.log(`✓ Existing session is valid for ${email} (${profileLabel})`);
       return;
     }
 
-    // Session is expired — wipe stale cookies/storage so login starts clean
-    console.log('Session expired. Clearing stale session data before re-logging in...');
-    fs.rmSync(SESSION_DIR, { recursive: true, force: true });
-    fs.mkdirSync(SESSION_DIR);
+    // Session is expired — wipe just this profile's state file
+    console.log(`Session expired for ${profileLabel}. Clearing stale session data before re-logging in...`);
+    fs.rmSync(stateFile, { force: true });
   }
 
-  const { browser, context } = await createBrowserContext();
+  const { browser, context } = await createBrowserContext({ profile });
 
-  // Perform fresh login
-  await performLogin(context);
+  // Temporarily override env vars so performLogin picks up the right credentials
+  const origEmail = process.env.DEMO_EMAIL;
+  const origPassword = process.env.DEMO_PASSWORD;
+  if (profile && profile !== 'default') {
+    if (email) process.env.DEMO_EMAIL = email;
+    if (password) process.env.DEMO_PASSWORD = password;
+  }
+
+  // Perform fresh login — pass profile so saveSession writes to the correct file
+  await performLogin(context, profile);
+
+  // Restore env vars
+  if (profile && profile !== 'default') {
+    process.env.DEMO_EMAIL = origEmail;
+    process.env.DEMO_PASSWORD = origPassword;
+    console.log(`✓ Session saved for ${profileLabel}`);
+  }
 
   if (opts.verifyCopilot) {
     await verifyCopilot(context);

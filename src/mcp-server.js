@@ -52,6 +52,14 @@ const TOOLS = [
         teams_url: { type: 'string', description: 'Teams URL if already known' },
         outlook_url: { type: 'string', description: 'Outlook URL if already known' },
         xero_url: { type: 'string', description: 'Xero URL if already known' },
+        outlook_recipient_url: {
+          type: 'string',
+          description: "Outlook inbox URL for the email recipient (volunteer/approver) — requires a saved session for the recipient account",
+        },
+        outlook_recipient_profile: {
+          type: 'string',
+          description: "Name of the saved auth profile for the recipient account (default: 'recipient'). Run: agentdemo auth --profile recipient",
+        },
         headless: { type: 'boolean', description: 'Run browser in headless mode (default: true)', default: true },
       },
       required: ['studio_url', 'm365_url'],
@@ -109,6 +117,14 @@ const TOOLS = [
         custom_urls: {
           type: 'string',
           description: 'Comma-separated URLs for custom platform captures',
+        },
+        outlook_recipient_url: {
+          type: 'string',
+          description: "Outlook inbox URL for the email recipient (volunteer/approver) — requires a saved session for the recipient account",
+        },
+        outlook_recipient_profile: {
+          type: 'string',
+          description: "Name of the saved auth profile for the recipient account (default: 'recipient'). Run: agentdemo auth --profile recipient",
         },
         slug: {
           type: 'string',
@@ -191,6 +207,7 @@ async function handlePlanDemo(args) {
   const {
     studio_url, m365_url, agent_name, instructions, platforms,
     sharepoint_url, power_automate_url, teams_url, outlook_url, xero_url,
+    outlook_recipient_url, outlook_recipient_profile,
     headless = true,
   } = args;
 
@@ -210,6 +227,8 @@ async function handlePlanDemo(args) {
       teamsUrl: teams_url || undefined,
       outlookUrl: outlook_url || undefined,
       xeroUrl: xero_url || undefined,
+      outlookRecipientUrl: outlook_recipient_url || undefined,
+      outlookRecipientProfile: outlook_recipient_profile || undefined,
       headless,
     });
   } catch (err) {
@@ -221,6 +240,7 @@ async function handleCreateDemo(args) {
   const {
     studio_url, m365_url, agent_name, instructions, platforms,
     sharepoint_url, power_automate_url, teams_url, outlook_url, xero_url, custom_urls,
+    outlook_recipient_url, outlook_recipient_profile,
     slug, headless = false,
   } = args;
 
@@ -244,6 +264,8 @@ async function handleCreateDemo(args) {
       outlookUrl: outlook_url || undefined,
       xeroUrl: xero_url || undefined,
       customUrl: customUrlArr,
+      outlookRecipientUrl: outlook_recipient_url || undefined,
+      outlookRecipientProfile: outlook_recipient_profile || undefined,
       slug: slug || undefined,
       headless,
       mcpMode: true,
