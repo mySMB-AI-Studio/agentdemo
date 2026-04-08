@@ -626,10 +626,10 @@ Connected platforms: ${platforms}
 Design a conversation of 3–6 steps. The steps must flow logically as a real user session — each step builds on the previous response. The conversation should demonstrate a complete end-to-end workflow from discovery through to action.
 
 Rules:
-- Use [ENTITY] as a placeholder in a prompt when the actual value (e.g. a record name, licence number, item name) will only be known after reading the previous agent response
-- Set extract_entity to true when the response will contain a specific named item that the NEXT step needs to reference
-- entity_context describes what kind of thing to extract (e.g. "licence name", "invoice number", "project name")
-- Set capture_platform_after to the platform slug (e.g. "sharepoint", "power-automate") when this step causes a visible change in that platform worth screenshotting — otherwise null
+- Use [ENTITY] as a placeholder in a prompt when the actual value (e.g. a record name, licence number, person name) will only be known after reading the previous agent response
+- Set extract_entity to true when the response will contain a SINGLE specific named item (one name, one ID, one record) that the NEXT step references — never use this for lists
+- entity_context must describe exactly ONE thing to extract (e.g. "first volunteer name", "licence name", "invoice number") — be specific so only one value is returned
+- Set capture_platform_after to the platform slug ONLY when this step causes a WRITE or visible change in that platform (a new record created, an email sent, a row updated) — do NOT use it for read-only queries or lookups
 - slide_label is a short business-level headline (≤8 words) shown in the demo viewer
 - Make prompts sound natural, like a real business user would type them
 
@@ -1049,13 +1049,24 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
 
       if (platform === 'sharepoint') {
         await tab.waitForTimeout(3000);
-        const spSelectors = ['[role="grid"]', '.ms-List', '.ms-DetailsList', 'table', '[data-automationid="ListCell"]'];
-        for (const sel of spSelectors) {
-          try { await tab.waitForSelector(sel, { timeout: 10000 }); break; } catch { /* next */ }
+        // SharePoint list selectors — also handle Excel Online (longer load, different DOM)
+        const isExcel = conn?.url && (conn.url.includes('.xlsx') || conn.url.includes('.xls') || conn.url.includes('Doc.aspx'));
+        if (isExcel) {
+          // Excel Online: wait for spreadsheet canvas or toolbar
+          const xlSelectors = ['[id="WACViewPanel"]', '.WACViewPanel', '[data-testid="ExcelViewport"]', '.xl-sheets-container', '[role="main"]'];
+          for (const sel of xlSelectors) {
+            try { await tab.waitForSelector(sel, { timeout: 20000 }); break; } catch { /* next */ }
+          }
+          await tab.waitForTimeout(4000); // extra time for Excel to fully render
+        } else {
+          const spSelectors = ['[role="grid"]', '.ms-List', '.ms-DetailsList', 'table', '[data-automationid="ListCell"]'];
+          for (const sel of spSelectors) {
+            try { await tab.waitForSelector(sel, { timeout: 10000 }); break; } catch { /* next */ }
+          }
+          await tab.waitForTimeout(2000);
+          await tab.evaluate(() => window.scrollBy(0, 200));
+          await tab.waitForTimeout(1000);
         }
-        await tab.waitForTimeout(2000);
-        await tab.evaluate(() => window.scrollBy(0, 200));
-        await tab.waitForTimeout(1000);
 
       } else if (platform === 'power-automate') {
         await tab.waitForTimeout(3000);
