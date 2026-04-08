@@ -1415,29 +1415,32 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
           await scrollAndScreenshot(page, ssPath);
           console.log(`    ✓ Screenshot saved`);
 
-          slides.push({
-            id: slideId++,
-            platform: 'm365-copilot',
-            type: 'agent',
-            screenshot: ssPath,
-            clip: null,
-            prompt: promptText,
-            callout: null,
-            storyLabel: step.slide_label || '',
-            partial: isPartial,
-            needsReview: hasError,
-          });
-
           // ── Mid-conversation platform capture ──
           // Opened in a new tab so the chat thread is never interrupted.
+          // If no URL is available, tag the conversation slide so the callout
+          // generator can mention the platform narratively instead.
+          let skippedPlatform = null;
           if (step.capture_platform_after) {
             const capPlatform = step.capture_platform_after;
             const capConn = discovered.connections.find(c => c.platform === capPlatform && c.url);
             if (capConn) {
               const displayName = PLATFORM_DISPLAY[capPlatform] || capPlatform;
-              console.log(`\n  ● Slide ${slideId} — ${displayName} (post-action capture)`);
-              const platSsPath = path.join(screenshotsDir, `${slideId}-${capPlatform}-action.png`);
+              console.log(`\n  ● Slide ${slideId + 1} — ${displayName} (post-action capture)`);
+              const platSsPath = path.join(screenshotsDir, `${slideId + 1}-${capPlatform}-action.png`);
               const captured = await capturePlatformInNewTab(capConn, platSsPath);
+              // Push conversation slide first, then platform slide
+              slides.push({
+                id: slideId++,
+                platform: 'm365-copilot',
+                type: 'agent',
+                screenshot: ssPath,
+                clip: null,
+                prompt: promptText,
+                callout: null,
+                storyLabel: step.slide_label || '',
+                partial: isPartial,
+                needsReview: hasError,
+              });
               slides.push({
                 id: slideId++, platform: capPlatform, type: 'platform',
                 placeholder: !captured, connectorName: capConn.name,
@@ -1446,8 +1449,35 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
                 storyLabel: `Result in ${displayName}`, placeholderInfo: null,
               });
             } else {
-              console.log(`    ⚠ capture_platform_after="${capPlatform}" — no URL found, skipping`);
+              console.log(`    ⚠ capture_platform_after="${capPlatform}" — no URL, will mention in callout`);
+              skippedPlatform = capPlatform;
+              slides.push({
+                id: slideId++,
+                platform: 'm365-copilot',
+                type: 'agent',
+                screenshot: ssPath,
+                clip: null,
+                prompt: promptText,
+                callout: null,
+                storyLabel: step.slide_label || '',
+                partial: isPartial,
+                needsReview: hasError,
+                skippedPlatform,
+              });
             }
+          } else {
+            slides.push({
+              id: slideId++,
+              platform: 'm365-copilot',
+              type: 'agent',
+              screenshot: ssPath,
+              clip: null,
+              prompt: promptText,
+              callout: null,
+              storyLabel: step.slide_label || '',
+              partial: isPartial,
+              needsReview: hasError,
+            });
           }
 
           await page.waitForTimeout(2000);
@@ -1540,9 +1570,15 @@ async function generateCallouts(slides, agentName, description) {
 
       const platformLabel = slide.platform === 'm365-copilot' ? 'M365 Copilot (agent chat)' : slide.platform;
 
+      // If this step triggered a platform action but the URL wasn't available,
+      // instruct the callout to mention that platform narratively.
+      const skippedNote = slide.skippedPlatform
+        ? `\nIMPORTANT: This step also triggers an action in ${PLATFORM_DISPLAY[slide.skippedPlatform] || slide.skippedPlatform} that is not shown in this demo (no URL was provided). End your callout with a brief narrative mention, e.g. "...and a ${PLATFORM_DISPLAY[slide.skippedPlatform] || slide.skippedPlatform} notification is automatically sent to the coordinator."`
+        : '';
+
       const response = await client.messages.create({
         model: 'claude-sonnet-4-6',
-        max_tokens: 300,
+        max_tokens: 350,
         messages: [{
           role: 'user',
           content: [
@@ -1556,7 +1592,7 @@ async function generateCallouts(slides, agentName, description) {
 
 Agent description: ${description || 'An AI agent built with Microsoft Copilot Studio.'}
 Platform shown: ${platformLabel}
-${slide.prompt ? `User prompt: "${slide.prompt}"` : ''}
+${slide.prompt ? `User prompt: "${slide.prompt}"` : ''}${skippedNote}
 
 Write a single callout bubble text (2-3 sentences max) that:
 - Explains what the viewer is seeing in plain English
