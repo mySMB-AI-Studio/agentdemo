@@ -1,81 +1,143 @@
 # AgentDemo
 
-Automatically creates Storylane-style interactive demos for Microsoft Copilot Studio agents. Paste two URLs, get a polished demo HTML file.
+Automatically creates Storylane-style interactive demos for Microsoft Copilot Studio agents. Provide your agent URLs, get a polished demo HTML file — complete with AI-written callouts, platform screenshots, and a full end-to-end conversation.
 
-## Getting Started
+**Typical run time: 6–10 minutes** for an 8-slide demo.
 
-```bash
+---
+
+## Setup
+
+### 1. Install dependencies
+
+```
 npm install
 ```
 
-### 1. Log in (one time)
-
-```bash
-node agentdemo.js auth
-```
-
-Complete MFA if prompted, then press Enter. Session is saved for all future runs.
-
-### 2. Create a demo
-
-```bash
-node agentdemo.js create
-```
-
-Paste your **Copilot Studio agent URL** and **M365 Copilot agent URL** when asked. That's it.
-
-AgentDemo will:
-- Read your agent's topics, connections, and config from Copilot Studio
-- Open M365 Copilot and capture the agent responding to real prompts
-- Generate AI-written callout text for each slide (requires `ANTHROPIC_API_KEY` in `.env`)
-- Build a Storylane-style `demo.html` and open it in your browser
-
-### 3. Share
-
-The output is at `demos/{agent-name}/output/demo.html` — a single self-contained HTML file.
-
-## Setup
+### 2. Configure credentials
 
 Copy `.env.example` to `.env` and fill in:
 
 ```
-DEMO_EMAIL=demo@yourtenant.onmicrosoft.com
+DEMO_EMAIL=darren@yourtenant.onmicrosoft.com
 DEMO_PASSWORD=your-password
-DEMO_TENANT=yourtenant
-ANTHROPIC_API_KEY=sk-ant-...    # optional, for AI callout text
+ANTHROPIC_API_KEY=sk-ant-...
+
+# Optional: named profiles for multi-account demos (e.g. recipient inbox)
+PROFILE_SEAN_EMAIL=sean@yourtenant.onmicrosoft.com
+PROFILE_SEAN_PASSWORD=sean-password
 ```
 
-## Advanced Commands
+### 3. Authenticate
 
-These exist for power users and debugging. You don't need them for standard use.
+```
+# Default account (the demo presenter / coordinator)
+node agentdemo.js auth
 
-| Command | Description |
-|---------|-------------|
-| `agentdemo create` | **The main command** — does everything end to end |
-| `agentdemo auth [--status]` | Manage demo account session |
-| `agentdemo init --discover` | Guided interview with auto-discovery |
-| `agentdemo check --config <path>` | Pre-flight verification |
-| `agentdemo capture --config <path>` | Capture screenshots only |
-| `agentdemo generate --config <path>` | Generate HTML from existing assets |
-| `agentdemo run --config <path>` | Capture then generate |
-| `agentdemo resume --config <path>` | Resume a failed capture run |
+# Named profile for a second account (e.g. email recipient)
+node agentdemo.js auth --profile sean
+
+# Check session status for all saved sessions
+node agentdemo.js auth --status
+```
+
+Complete MFA if prompted. Sessions are saved to `.browser-session/` and reused on subsequent runs.
+
+---
+
+## Running a Demo
+
+Demos are driven through the MCP tool interface. Use `call-mcp-tool.mjs` from the command line:
+
+```
+cd "C:\path\to\agentdemo"
+node call-mcp-tool.mjs <tool_name> <json_args>
+```
+
+### Plan first (recommended)
+
+Discovers the agent and surfaces any missing inputs before committing to a full run:
+
+```
+node call-mcp-tool.mjs plan_demo "{\"studio_url\": \"...\", \"m365_url\": \"...\"}"
+```
+
+### Create a demo
+
+```
+node call-mcp-tool.mjs create_demo "{
+  \"agent_name\": \"My Agent\",
+  \"studio_url\": \"https://copilotstudio.microsoft.com/...\",
+  \"m365_url\": \"https://m365.cloud.microsoft/chat/?...\",
+  \"platforms\": \"sharepoint,power-automate,outlook\",
+  \"sharepoint_url\": \"https://...\",
+  \"power_automate_url\": \"https://make.powerautomate.com/...\",
+  \"outlook_url\": \"https://outlook.office.com/mail/\",
+  \"outlook_recipient_url\": \"https://outlook.office.com/mail/\",
+  \"outlook_recipient_profile\": \"sean\",
+  \"headless\": true
+}"
+```
+
+The output HTML is at `demos/{agent-slug}/output/demo.html` — open it in any browser.
+
+```
+# Open in browser (Windows)
+start demos\my-agent\output\demo.html
+```
+
+---
+
+## All MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `plan_demo` | Discover agent info and surface missing inputs before running |
+| `create_demo` | Full end-to-end demo capture and HTML generation |
+| `get_demo_status` | Check screenshots, HTML status, and last updated time |
+| `resume_demo` | Resume an interrupted capture session |
+| `list_demos` | List all demos with status |
+| `generate_demo_html` | Regenerate HTML from existing screenshots without re-running the browser |
+
+### `create_demo` parameters
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `studio_url` | ✓ | Copilot Studio agent URL |
+| `m365_url` | ✓ | M365 Copilot chat URL where the agent is published |
+| `agent_name` | | Override for agent name if discovery fails |
+| `instructions` | | Agent context/workflow description to guide script generation |
+| `platforms` | | Comma-separated list: `sharepoint`, `power-automate`, `outlook`, `teams` |
+| `sharepoint_url` | | SharePoint list or Excel file URL |
+| `power_automate_url` | | Power Automate cloud flows page URL |
+| `outlook_url` | | Coordinator's Outlook URL (skipped if `outlook_recipient_url` set) |
+| `teams_url` | | Teams channel URL |
+| `outlook_recipient_url` | | Recipient's Outlook inbox URL — captures the received email |
+| `outlook_recipient_profile` | | Auth profile name for recipient account (e.g. `sean`) |
+| `headless` | | Run browser invisibly (default: `false`) |
+| `slug` | | Custom folder name for the demo |
+
+---
+
+## How It Works
+
+1. **Discover** — Reads the agent's name, topics, instructions, and connected platforms from Copilot Studio
+2. **Script** — AI generates a 3–6 step conversation that tells a complete business story
+3. **Capture** — Opens M365 Copilot headlessly, types each prompt, waits for the agent's response, and screenshots the result. If the agent asks follow-up questions before completing an action, AI generates contextually appropriate replies to drive the conversation to completion
+4. **Platforms** — Platform screenshots (SharePoint, Power Automate, Outlook) are captured in separate tabs so the chat thread is never interrupted
+5. **Recipient inbox** — A second browser context loads the recipient's saved session and waits for the email to arrive, then opens and screenshots it
+6. **Narrate** — Each screenshot is sent to Claude to generate guided-tour callout text
+7. **Generate** — Builds a self-contained HTML demo with browser-frame screenshots, callout bubbles, keyboard navigation, and progress dots
+
+---
 
 ## MCP Server (Claude Code plugin)
 
-AgentDemo can run as an MCP server so you can drive it directly from Claude Code.
+AgentDemo runs as an MCP server so it can be driven from within a Claude Code session.
 
-### Prerequisites
+### Register in Claude Code
 
-1. **Clone this repo** and run `npm install` inside the `agentdemo` folder.
-2. **Create your `.env` file** — copy `.env.example` to `.env` and fill in your credentials. The MCP server loads credentials from `.env` automatically at startup, so they do not need to be passed through the plugin config.
-
-### Install the plugin
-
-Import `agentdemo-plugin.zip` into Claude Code. The plugin's `.mcp.json` points to `src/mcp-server.js` in this repo — no environment variables are needed in the plugin config since they are read from `.env`.
-
-### Register manually (alternative)
-
-If you prefer not to use the plugin zip, add this to your Claude Code `settings.json`:
+Add to your Claude Code `settings.json`:
 
 ```json
 {
@@ -83,31 +145,10 @@ If you prefer not to use the plugin zip, add this to your Claude Code `settings.
     "agentdemo": {
       "command": "node",
       "args": ["src/mcp-server.js"],
-      "cwd": "/absolute/path/to/agentdemo"
+      "cwd": "C:\\path\\to\\agentdemo"
     }
   }
 }
 ```
 
-### Available tools
-
-| Tool | Description |
-|------|-------------|
-| `create_demo` | Create a demo from Copilot Studio + M365 Copilot URLs |
-| `get_demo_status` | Check screenshots, HTML, and status for a demo |
-| `resume_demo` | Resume an interrupted capture session |
-| `list_demos` | List all demos with status |
-| `generate_demo_html` | Regenerate HTML from existing screenshots |
-
-### Run directly
-
-```bash
-npm run mcp
-```
-
-## How It Works
-
-1. **Discover** — Reads your agent's topics, trigger phrases, and connected platforms from Copilot Studio
-2. **Capture** — Opens M365 Copilot, types each prompt, waits for the agent's streaming response, and screenshots the result
-3. **Narrate** — Sends each screenshot to Claude to generate guided-tour callout text
-4. **Generate** — Builds a self-contained HTML demo with browser-frame screenshots, callout bubbles, keyboard navigation, and progress dots
+The MCP server loads credentials from `.env` automatically — no environment variables needed in the plugin config.
