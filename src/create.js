@@ -626,10 +626,12 @@ Connected platforms: ${platforms}
 Design a conversation of 3–6 steps. The steps must flow logically as a real user session — each step builds on the previous response. The conversation should demonstrate a complete end-to-end workflow from discovery through to action.
 
 Rules:
-- Use [ENTITY] as a placeholder in a prompt when the actual value (e.g. a record name, licence number, person name) will only be known after reading the previous agent response
-- Set extract_entity to true when the response will contain a SINGLE specific named item (one name, one ID, one record) that the NEXT step references — never use this for lists
+- Use [ENTITY] as a placeholder in a prompt when the actual value (e.g. a record name, licence number, person name) will only be known after reading the PREVIOUS step's agent response
+- Set extract_entity to true when THIS step's response will contain a SINGLE specific named item (one name, one ID, one record) that the NEXT step will reference with [ENTITY] — never use this for lists
 - entity_context must describe exactly ONE thing to extract (e.g. "first volunteer name", "licence name", "invoice number") — be specific so only one value is returned
+- CRITICAL: NEVER put [ENTITY] in a step's own prompt if that same step also has extract_entity:true. [ENTITY] only belongs in the prompt of the step AFTER the extraction step. Each step either extracts OR references [ENTITY] — never both.
 - Set capture_platform_after to the platform slug ONLY when this step causes a WRITE or visible change in that platform (a new record created, an email sent, a row updated) — do NOT use it for read-only queries or lookups
+- When a step sends an email or triggers an action that requires content (subject, recipient, body), the prompt MUST include all necessary details so the agent can proceed without asking follow-up questions. Do not say "can you send an email" alone — include purpose, recipient context, and tone (e.g. "Please send [ENTITY] a confirmation email letting them know they have been selected and to expect further instructions from the coordinator")
 - slide_label is a short business-level headline (≤8 words) shown in the demo viewer
 - Make prompts sound natural, like a real business user would type them
 
@@ -670,6 +672,68 @@ Respond in JSON only, no markdown:
   }
 
   return null;
+}
+
+// ───────────────────────────────────────────
+// Content-aware follow-through helpers
+// ───────────────────────────────────────────
+
+/**
+ * Single AI call that reads the agent's response and decides:
+ * - Is the intended action already complete?
+ * - If not, what follow-up message should the user send?
+ *
+ * Returns { complete: boolean, followUp: string | null }
+ * Falls back to { complete: false, followUp: null } on API failure so the
+ * caller can still take the screenshot and move on rather than looping forever.
+ */
+async function analyzeAgentResponse(agentResponse, stepGoal, platform, agentName, contextHint) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return { complete: false, followUp: null };
+
+  try {
+    const mod = await import('@anthropic-ai/sdk');
+    const Anthropic = mod.default || mod.Anthropic;
+    const client = new Anthropic({ apiKey });
+
+    const resp = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 300,
+      messages: [{
+        role: 'user',
+        content: `You are helping automate a product demo for an AI agent called "${agentName}".
+
+The goal of the current demo step is: "${stepGoal}"
+The expected platform action when complete: ${platform}
+Demo context: ${contextHint || 'No additional context.'}
+
+The agent just responded with:
+"""
+${agentResponse.substring(0, 1000)}
+"""
+
+Answer these two questions in JSON (no markdown):
+1. "complete": true if the agent has already performed the requested action (e.g. sent the email, updated the record, triggered the flow) — false if it is still asking for information or confirmation.
+2. "follow_up": if complete is false, write the exact message the user should send next to give the agent what it needs (1–3 natural sentences using realistic demo data). If complete is true, set to null.
+
+{ "complete": true|false, "follow_up": "..." | null }`,
+      }],
+    });
+
+    const raw = (resp.content[0]?.text || '').trim();
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      return {
+        complete: !!parsed.complete,
+        followUp: parsed.follow_up || null,
+      };
+    }
+  } catch (err) {
+    console.log(`    ⚠ Follow-through analysis failed: ${err.message?.substring(0, 60)}`);
+  }
+
+  return { complete: false, followUp: null };
 }
 
 // ───────────────────────────────────────────
@@ -840,26 +904,24 @@ async function waitForAgentResponse(page, maxSeconds = 120) {
   return { complete: responseComplete, lastMsgText, elapsed };
 }
 
-/** Scroll the last agent response to the top of the viewport, then screenshot */
+/** Scroll the conversation to show the latest agent response, then screenshot */
 async function scrollAndScreenshot(page, screenshotPath) {
+  // Scroll every scrollable container on the page to its bottom.
+  // M365 Copilot keeps messages in a scrollable inner div — we don't know
+  // its exact selector so we blast all of them.
   await page.evaluate(() => {
-    const msgSelectors = [
-      '[data-testid*="assistant"]', '[class*="assistant" i]',
-      '[class*="agent-message" i]', '[class*="bot-message" i]',
-      '[class*="copilot" i][class*="message" i]',
-      '[data-testid*="message"]', '[class*="message" i]',
-      '[class*="response" i]', '[role="listitem"]',
-    ];
-    for (const sel of msgSelectors) {
-      const els = document.querySelectorAll(sel);
-      if (els.length > 0) {
-        els[els.length - 1].scrollIntoView({ behavior: 'instant', block: 'start' });
-        return;
+    const all = document.querySelectorAll('*');
+    for (const el of all) {
+      if (el.scrollHeight > el.clientHeight + 10) {
+        el.scrollTop = el.scrollHeight;
       }
     }
     window.scrollTo(0, document.body.scrollHeight);
   }).catch(() => {});
-  await page.waitForTimeout(1500);
+
+  // Also use keyboard End to ensure the viewport follows
+  await page.keyboard.press('End').catch(() => {});
+  await page.waitForTimeout(2000);
 
   await page.screenshot({ path: screenshotPath, fullPage: false });
 
@@ -1050,7 +1112,21 @@ async function captureRecipientInbox(recipientUrl, profile, slideId, screenshots
     return null;
   }
 
-  const sessionOk = await isSessionValid(recipientContext);
+  // Check session validity against the actual recipient URL (Outlook), not office.com,
+  // because the saved session may only have cookies for outlook.office.com.
+  const sessionOk = await (async () => {
+    const checkPage = await recipientContext.newPage();
+    try {
+      await checkPage.goto(recipientUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await checkPage.waitForTimeout(3000);
+      const landed = checkPage.url();
+      await checkPage.close();
+      return !landed.includes('login.microsoftonline.com') && !landed.includes('login.live.com');
+    } catch {
+      await checkPage.close().catch(() => {});
+      return false;
+    }
+  })();
   if (!sessionOk) {
     console.log(`    ⚠ Recipient session invalid for profile "${profile}". Run: agentdemo auth --profile ${profile}`);
     await recipientBrowser.close().catch(() => {});
@@ -1101,6 +1177,30 @@ async function captureRecipientInbox(recipientUrl, profile, slideId, screenshots
 
     if (emailFound) {
       console.log(`    ✓ Email detected in recipient inbox`);
+      // Click the first/top email to open it so the content is visible in the screenshot
+      const OPEN_SELECTORS = [
+        '[data-convid]',
+        '[role="listbox"] [role="option"]',
+        '[role="list"] [role="listitem"]',
+        '.ms-List-cell',
+      ];
+      let opened = false;
+      for (const sel of OPEN_SELECTORS) {
+        try {
+          const el = await page.$(sel);
+          if (el) {
+            await el.click();
+            await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+            await page.waitForTimeout(3000);
+            opened = true;
+            console.log(`    ✓ Email opened`);
+            break;
+          }
+        } catch { /* try next */ }
+      }
+      if (!opened) {
+        console.log(`    ⚠ Could not open email — screenshotting inbox list view`);
+      }
     } else {
       console.log(`    ⚠ No email detected after 90s — screenshotting inbox anyway`);
     }
@@ -1256,6 +1356,14 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
     for (const conn of platformConns) {
       const platform = conn.platform;
       const displayName = PLATFORM_DISPLAY[platform] || platform;
+
+      // Skip the coordinator's Outlook initial slide when a recipient inbox is configured —
+      // the recipient's open email is a more meaningful Outlook proof-point.
+      if (platform === 'outlook' && outlookRecipientUrl) {
+        console.log(`  ● Slide — Outlook (initial) skipped — recipient inbox will be shown instead\n`);
+        continue;
+      }
+
       console.log(`  ● Slide ${slideId} — ${displayName}`);
       if (conn.url) {
         console.log(`    Navigating to ${displayName} in new tab...`);
@@ -1510,9 +1618,99 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
 
           if (!result.complete) isPartial = true;
 
-          // Extract entity from this response if needed for the next step
+          // ── Content-aware follow-through ──────────────────────────────────────
+          // For steps that should trigger a platform write (e.g. send email),
+          // ask AI to read the agent's response and decide: done, or needs more?
+          // Connection approval UIs are handled by clicking, not typing.
+          if (step.capture_platform_after && result.lastMsgText) {
+            const MAX_FOLLOW_UPS = 3;
+            let followUpCount = 0;
+            const contextHint = discovered.instructions || discovered.description || '';
+
+            while (followUpCount < MAX_FOLLOW_UPS) {
+              // Check for connection approval UI first — this must be clicked, not typed
+              const connCheck = await detectConnectionRequest(page);
+              if (connCheck.detected) {
+                console.log(`    ↪ Connection approval detected — handling in follow-through loop`);
+                const connResult = await handleConnectionRequest(page, connCheck.platform, slideId, screenshotsDir, headless);
+                connectionEvents.push({ platform: connResult.platform, screenshotPath: connResult.ssPath });
+                // After approval, re-navigate and re-send the original prompt
+                console.log('    Retrying prompt after connection approval...');
+                await page.goto(m365Url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+                await page.waitForLoadState('networkidle').catch(() => {});
+                await page.waitForTimeout(8000);
+                await dismissPopups(page);
+                await verifyAgentLoaded(page, discovered.name, m365Url);
+                try {
+                  const retryLocator = page.locator(INPUT_SEL).last();
+                  await retryLocator.waitFor({ state: 'visible', timeout: 15000 });
+                  await retryLocator.click();
+                  await page.waitForTimeout(300);
+                  await page.keyboard.press('Control+A');
+                  await page.keyboard.press('Backspace');
+                  await page.waitForTimeout(200);
+                  await page.keyboard.type(promptText, { delay: 50 });
+                  await page.waitForTimeout(500);
+                  await page.keyboard.press('Enter');
+                  result = await waitForAgentResponse(page, RESPONSE_TIMEOUT);
+                  if (!result.complete) isPartial = true;
+                } catch (retryErr) {
+                  console.log(`    ⚠ Retry after connection approval failed: ${retryErr.message?.substring(0, 50)}`);
+                }
+                continue; // Re-check from top of loop
+              }
+
+              const analysis = await analyzeAgentResponse(
+                result.lastMsgText,
+                step.slide_label || step.prompt,
+                step.capture_platform_after,
+                discovered.name,
+                contextHint,
+              );
+
+              if (analysis.complete) {
+                console.log(`    ✓ Action confirmed complete`);
+                break;
+              }
+
+              if (!analysis.followUp) {
+                // AI couldn't determine a follow-up — stop looping
+                break;
+              }
+
+              followUpCount++;
+              console.log(`    ↪ Agent needs more info (follow-up ${followUpCount}/${MAX_FOLLOW_UPS})`);
+              console.log(`      Sending: "${analysis.followUp.substring(0, 80)}${analysis.followUp.length > 80 ? '...' : ''}"`);
+
+              const fuLocator = page.locator(INPUT_SEL).last();
+              await fuLocator.waitFor({ state: 'visible', timeout: 15000 });
+              await fuLocator.click();
+              await page.waitForTimeout(300);
+              await page.keyboard.press('Control+A');
+              await page.keyboard.press('Backspace');
+              await page.waitForTimeout(200);
+              await page.keyboard.type(analysis.followUp, { delay: 50 });
+              await page.waitForTimeout(500);
+              await page.keyboard.press('Enter');
+
+              result = await waitForAgentResponse(page, RESPONSE_TIMEOUT);
+              if (!result.complete) isPartial = true;
+            }
+
+            if (followUpCount === MAX_FOLLOW_UPS) {
+              console.log(`    ⚠ Reached follow-up limit (${MAX_FOLLOW_UPS}) — proceeding anyway`);
+            }
+          }
+          // ─────────────────────────────────────────────────────────────────────
+
+          // Extract entity from this response if needed for the next step.
+          // If the current prompt itself contained [ENTITY] (AI generation mistake),
+          // retroactively resolve it in the stored promptText so callouts show the real value.
           if (step.extract_entity && step.entity_context && result.lastMsgText) {
             extractedEntity = await extractEntityFromResponse(result.lastMsgText, step.entity_context);
+            if (extractedEntity && promptText.includes('[ENTITY]')) {
+              promptText = promptText.replace(/\[ENTITY\]/g, extractedEntity);
+            }
           }
 
           const hasError = ERROR_PHRASES.some(phrase => (result.lastMsgText || '').toLowerCase().includes(phrase));
@@ -1532,10 +1730,12 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
             const capConn = discovered.connections.find(c => c.platform === capPlatform && c.url);
             if (capConn) {
               const displayName = PLATFORM_DISPLAY[capPlatform] || capPlatform;
-              console.log(`\n  ● Slide ${slideId + 1} — ${displayName} (post-action capture)`);
-              const platSsPath = path.join(screenshotsDir, `${slideId + 1}-${capPlatform}-action.png`);
-              const captured = await capturePlatformInNewTab(capConn, platSsPath);
-              // Push conversation slide first, then platform slide
+
+              // When a recipient inbox is configured for Outlook, skip the coordinator's
+              // post-action slide (inbox view) — the recipient slide is more meaningful.
+              const skipCoordinatorSlide = capPlatform === 'outlook' && !!outlookRecipientUrl;
+
+              // Push conversation slide first
               slides.push({
                 id: slideId++,
                 platform: 'm365-copilot',
@@ -1548,16 +1748,23 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
                 partial: isPartial,
                 needsReview: hasError,
               });
-              slides.push({
-                id: slideId++, platform: capPlatform, type: 'platform',
-                placeholder: !captured, connectorName: capConn.name,
-                screenshot: captured ? platSsPath : null,
-                clip: null, prompt: null, callout: null,
-                storyLabel: `Result in ${displayName}`, placeholderInfo: null,
-              });
 
-              // After a successful Outlook capture, also capture the recipient inbox if configured
-              if (capPlatform === 'outlook' && captured && outlookRecipientUrl) {
+              let captured = false;
+              if (!skipCoordinatorSlide) {
+                console.log(`\n  ● Slide ${slideId} — ${displayName} (post-action capture)`);
+                const platSsPath = path.join(screenshotsDir, `${slideId}-${capPlatform}-action.png`);
+                captured = await capturePlatformInNewTab(capConn, platSsPath);
+                slides.push({
+                  id: slideId++, platform: capPlatform, type: 'platform',
+                  placeholder: !captured, connectorName: capConn.name,
+                  screenshot: captured ? platSsPath : null,
+                  clip: null, prompt: null, callout: null,
+                  storyLabel: `Result in ${displayName}`, placeholderInfo: null,
+                });
+              }
+
+              // After Outlook step, capture the recipient inbox if configured
+              if (capPlatform === 'outlook' && outlookRecipientUrl) {
                 const recipientSsPath = await captureRecipientInbox(
                   outlookRecipientUrl,
                   outlookRecipientProfile,

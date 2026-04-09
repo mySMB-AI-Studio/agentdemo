@@ -141,6 +141,36 @@ export async function performLogin(context, profile) {
       } catch {
         console.log('  ⚠ Could not reach Copilot Studio during auth (non-fatal).');
       }
+      // Warm up Outlook so its cookies are captured in the session
+      console.log('  Warming up Outlook session...');
+      try {
+        await checkPage.goto('https://outlook.office.com/mail/', {
+          waitUntil: 'domcontentloaded',
+          timeout: 60000,
+        });
+        // Outlook has a multi-step redirect chain — wait for network to fully settle
+        await checkPage.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+        await checkPage.waitForTimeout(8000);
+        const outlookUrl = checkPage.url();
+        if (!outlookUrl.includes('login.microsoftonline.com') && !outlookUrl.includes('login.live.com')) {
+          console.log('  ✓ Outlook session established.');
+        } else {
+          console.log('  ⚠ Outlook requires manual sign-in.');
+          console.log('    The browser window is open at https://outlook.office.com — please sign in.');
+          // Page is already at the login URL — wait for user to complete login manually
+          await waitForKeypress('    Press Enter here once Outlook has fully loaded in the browser...');
+          await checkPage.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+          await checkPage.waitForTimeout(3000);
+          const afterUrl = checkPage.url();
+          if (!afterUrl.includes('login.microsoftonline.com') && !afterUrl.includes('login.live.com')) {
+            console.log('  ✓ Outlook session established.');
+          } else {
+            console.log('  ⚠ Outlook still showing login page — session may not include Outlook cookies.');
+          }
+        }
+      } catch {
+        console.log('  ⚠ Could not reach Outlook during auth (non-fatal).');
+      }
       await checkPage.close();
       await saveSession(context, profile);
       console.log(`✓ Already logged in as ${email} — session saved.`);
@@ -253,6 +283,28 @@ export async function performLogin(context, profile) {
     }
   } catch {
     console.log('  ⚠ Could not reach Copilot Studio during auth (non-fatal).');
+  }
+
+  // Warm up Outlook so its cookies are captured in the session
+  console.log('  Warming up Outlook session...');
+  try {
+    await page.goto('https://outlook.office.com/mail/', {
+      waitUntil: 'domcontentloaded',
+      timeout: 60000,
+    });
+    // Outlook has a multi-step redirect chain — wait for network to fully settle
+    await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(8000);
+    const outlookUrl = page.url();
+    if (!outlookUrl.includes('login.microsoftonline.com') && !outlookUrl.includes('login.live.com')) {
+      console.log('  ✓ Outlook session established.');
+    } else {
+      console.log('  ⚠ Outlook redirected to login — waiting for you to complete login manually...');
+      await page.waitForLoadState('networkidle', { timeout: 60000 }).catch(() => {});
+      await page.waitForTimeout(5000);
+    }
+  } catch {
+    console.log('  ⚠ Could not reach Outlook during auth (non-fatal).');
   }
 
   await saveSession(context, profile);
