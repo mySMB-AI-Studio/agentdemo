@@ -1,6 +1,8 @@
 ---
 name: create-demo
 description: Creates a complete interactive demo for a Copilot Studio agent published to M365 Copilot. Captures real screenshots of the agent responding and supporting platforms (SharePoint, Power Automate, Teams, Outlook, Xero) and generates a shareable demo.html file. Use when asked to create, record, or generate a demo for an agent.
+argument-hint: [studio-url] [m365-url]
+allowed-tools: [Bash, Read, Glob]
 ---
 
 # Create Agent Demo

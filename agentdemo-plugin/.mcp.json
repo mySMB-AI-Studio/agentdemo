@@ -1,6 +1,8 @@
 {
-  "agentdemo": {
-    "command": "node",
-    "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-server.js"]
+  "mcpServers": {
+    "agentdemo": {
+      "command": "node",
+      "args": ["scripts/mcp-server.js"]
+    }
   }
 }

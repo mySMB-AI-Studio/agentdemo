@@ -1053,7 +1053,60 @@ async function handleConnectionRequest(page, platform, slideId, screenshotsDir, 
 
   const displayPlatform = detectedName || platform || 'your connected platform';
 
-  // 3. Print pause message
+  // 3a. Try to auto-click the "Connect to continue" button/card in chat
+  const autoClicked = await page.evaluate(() => {
+    const CONNECT_TEXTS = ['connect to continue', 'connect', 'authorize', 'sign in'];
+    // Try buttons and role="button" elements first (most specific)
+    const candidates = document.querySelectorAll('button, [role="button"], a');
+    for (const el of candidates) {
+      if (!el.offsetParent) continue; // skip hidden
+      const t = (el.textContent || '').trim().toLowerCase();
+      if (CONNECT_TEXTS.some(ct => t === ct || t === ct + ' to continue')) {
+        el.click();
+        return true;
+      }
+    }
+    // Try adaptive card action buttons (Copilot Studio connector approval cards)
+    const actionEls = document.querySelectorAll(
+      '[class*="adaptiveCard"] button, [class*="adaptive-card"] button, ' +
+      '[data-testid*="adaptive"] button, [class*="card-action" i], ' +
+      '[class*="cardAction" i], [class*="ac-pushButton" i]'
+    );
+    for (const el of actionEls) {
+      if (!el.offsetParent) continue;
+      const t = (el.textContent || '').trim().toLowerCase();
+      if (CONNECT_TEXTS.some(ct => t.includes(ct))) {
+        el.click();
+        return true;
+      }
+    }
+    // Last resort: click any visible element containing "connect to continue" text
+    const allEls = document.querySelectorAll('*');
+    for (const el of allEls) {
+      if (!el.offsetParent) continue;
+      if (el.children.length > 0) continue; // leaf nodes only
+      const t = (el.textContent || '').trim().toLowerCase();
+      if (t === 'connect to continue' || t === 'connect') {
+        el.click();
+        return true;
+      }
+    }
+    return false;
+  }).catch(() => false);
+
+  if (autoClicked) {
+    console.log('  ↪ Auto-clicked "Connect to continue" — waiting for connection to establish...');
+    await page.waitForTimeout(6000);
+    // Check if connection was established (page may have reloaded or response appeared)
+    const stillConnecting = await detectConnectionRequest(page).catch(() => ({ detected: false }));
+    if (!stillConnecting.detected) {
+      console.log('  ✓ Connection established automatically');
+      return { ssPath, platform: displayPlatform, autoApproved: true };
+    }
+    console.log('  ⚠ Auto-click did not resolve the connection — falling back to manual approval');
+  }
+
+  // 3b. Print pause message (auto-click failed or not available)
   console.log('');
   if (headless) {
     // In headless mode the user can't see or interact with the browser window
@@ -1486,7 +1539,7 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
 
       // Strategy 1: AI-generated conversation script
       if (generatedScript && generatedScript.steps && generatedScript.steps.length > 0) {
-        steps = generatedScript.steps.slice(0, 6);
+        steps = generatedScript.steps.slice(0, 12);
         console.log(`  Using ${steps.length} AI-generated script steps`);
       }
 
@@ -1580,8 +1633,10 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
 
           let result = await waitForAgentResponse(page, RESPONSE_TIMEOUT);
 
-          // Check for connection request if response seems stalled
-          if (!result.complete && result.lastMsgText.length < 10) {
+          // Check for connection request if response seems stalled OR contains connection keywords
+          const connectionKeywordsInResponse = result.lastMsgText &&
+            /connect to continue|connect your|needs access|connection required|sign in to/i.test(result.lastMsgText);
+          if ((!result.complete && result.lastMsgText.length < 10) || connectionKeywordsInResponse) {
             const connCheck = await detectConnectionRequest(page);
             if (connCheck.detected) {
               const connResult = await handleConnectionRequest(page, connCheck.platform, slideId, screenshotsDir, headless);

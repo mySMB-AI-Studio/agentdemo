@@ -6,8 +6,5 @@
     "name": "mySMB.com",
     "url": "https://mysmb.com"
   },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/mySMB-AI-Studio/agentdemo"
-  }
+  "repository": "https://github.com/mySMB-AI-Studio/agentdemo"
 }

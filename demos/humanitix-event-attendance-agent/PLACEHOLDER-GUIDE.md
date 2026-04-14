@@ -1,5 +1,5 @@
 # Placeholder Guide — Humanitix Event Attendance Agent
-Generated: 2026-04-06T01:31:36.141Z
+Generated: 2026-04-07T16:13:12.436Z
 
 1 slide(s) need manual screenshots. Instructions for each:
 

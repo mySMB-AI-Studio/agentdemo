@@ -1,6 +1,8 @@
 ---
 name: resume-demo
 description: Resumes a previously interrupted demo capture from the last incomplete slide. Use when a demo capture failed or was interrupted and needs to continue.
+argument-hint: [agent-name]
+allowed-tools: [Bash, Read, Glob]
 ---
 
 # Resume Agent Demo

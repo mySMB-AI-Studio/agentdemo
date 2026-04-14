@@ -121,7 +121,32 @@ async function dismissPopups(page) {
     }
     if (found) continue;
 
-    // Priority 2: Welcome / onboarding / "What's new" popups
+    // Priority 2: Copilot Studio "What's new" / release notes panel
+    // This panel appears on every Studio visit and blocks tab navigation if not dismissed.
+    try {
+      const studioWhatsNew = await page.evaluate(() => {
+        // Look for a panel/dialog whose heading contains "What's new" or "New features"
+        const headings = document.querySelectorAll('h1, h2, h3, [role="heading"], [class*="title" i]');
+        for (const h of headings) {
+          const t = h.textContent?.trim().toLowerCase() || '';
+          if (t.includes("what's new") || t.includes("whats new") || t.includes("new features") || t.includes("release notes")) {
+            // Find nearest dismiss button in the same panel
+            const panel = h.closest('[role="dialog"], [role="complementary"], [class*="panel" i], [class*="modal" i], [class*="callout" i]') || h.parentElement?.parentElement;
+            if (panel) {
+              const btn = panel.querySelector('button[aria-label="Close"], button[aria-label="Dismiss"], button[aria-label="close"], button[class*="close" i]');
+              if (btn) { btn.click(); return true; }
+            }
+          }
+        }
+        return false;
+      });
+      if (studioWhatsNew) {
+        await page.waitForTimeout(1500);
+        continue;
+      }
+    } catch { /* non-fatal */ }
+
+    // Priority 3: Welcome / onboarding / generic popups
     for (const sel of [
       'button:has-text("Skip")', 'button:has-text("skip")',
       'button:has-text("Dismiss")', 'button:has-text("Got it")',
@@ -211,24 +236,57 @@ async function discoverFromStudio(page, studioUrl) {
     sharepointUrls: [],
   };
 
+  const DEBUG_SCREENSHOT = path.join(ROOT, '.debug-studio-discovery.png');
+
   /** Navigate to Studio URL with retry */
   async function loadStudioPage(attempt = 1) {
     await maximizeWindow(page);
+    // Skip networkidle — Studio keeps persistent WebSocket connections that
+    // prevent it from ever reaching idle. Just wait for DOM content.
     await page.goto(studioUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    // Wait for networkidle with generous timeout
-    await page.waitForLoadState('networkidle', { timeout: 60000 }).catch(() => {});
-    // Wait for ANY meaningful content element to confirm SPA loaded
+    await page.waitForTimeout(3000);
+
+    // Bail early if auth redirected us to login — Studio may need its own
+    // session cookie warmup (run: agentdemo auth)
+    const landedUrl = page.url();
+    if (landedUrl.includes('login.microsoftonline.com') || landedUrl.includes('login.live.com')) {
+      throw new Error(
+        'Copilot Studio redirected to login. The saved session may not cover the Studio domain. ' +
+        'Run: agentdemo auth'
+      );
+    }
+
+    // Studio sometimes restores the last-visited agent from session state instead
+    // of navigating to the requested bot ID. Detect this and force a hard reload.
+    const botIdMatch = studioUrl.match(/bots\/([a-f0-9-]+)\//i);
+    if (botIdMatch && !landedUrl.includes(botIdMatch[1])) {
+      console.log(`    ⚠ Studio loaded a different agent (session restore). Forcing reload...`);
+      await page.goto(studioUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.waitForTimeout(3000);
+      const reloadedUrl = page.url();
+      if (!reloadedUrl.includes(botIdMatch[1])) {
+        console.log(`    ⚠ Still on wrong agent after reload — Studio may redirect to home on first visit.`);
+      }
+    }
+
+    // Studio's React SPA can take 90-120 s to hydrate in a fresh browser.
+    // Use Studio-specific selectors and a generous timeout.
     try {
       await page.waitForSelector(
-        'h1, h2, [role="tab"], [role="tablist"], [data-testid*="bot"], [class*="agent" i]',
-        { timeout: 30000 }
+        '[role="tablist"], [role="tab"], [data-testid*="bot"], [class*="botName" i], ' +
+        '[class*="agentName" i], nav[aria-label*="agent" i], h1, h2',
+        { timeout: 120000 }
       );
-    } catch {
+    } catch (selErr) {
+      await page.screenshot({ path: DEBUG_SCREENSHOT, fullPage: false }).catch(() => {});
       if (attempt === 1) {
-        console.log('    ⚠ Copilot Studio took too long to load. Retrying once...');
+        console.log('    ⚠ Copilot Studio content not found yet. Retrying once...');
         return loadStudioPage(2);
       }
-      throw new Error('Copilot Studio page did not load after 2 attempts');
+      throw new Error(
+        `Copilot Studio page did not render after 2 attempts (${selErr.message}). ` +
+        `Debug screenshot saved to: ${DEBUG_SCREENSHOT}`
+      );
     }
     await dismissPopups(page);
   }
@@ -243,17 +301,19 @@ async function discoverFromStudio(page, studioUrl) {
       'home', 'flows', 'copilot studio', 'microsoft copilot studio',
     ]);
 
+    // TAB_NAMES is a Set in Node but page.evaluate serialises it as a plain array.
+    // Use Array.prototype.includes inside evaluate (not Set.prototype.has).
     discovered.name = await page.evaluate((tabNames) => {
+      const isTabName = (s) => tabNames.includes(s.toLowerCase());
+
       // Strategy 1: Browser tab title
-      // Format: "Overview - Humanitix Event Attendance Agent"
-      // or: "Humanitix Event Attendance Agent - Microsoft Copilot Studio"
+      // Format: "Overview - Licence Renewal Agent"
+      // or: "Licence Renewal Agent - Microsoft Copilot Studio"
       const pageTitle = document.title || '';
       const titleParts = pageTitle.split(/\s*[-–|]\s*/);
-      // Try each part — skip known tab/app names
       for (const part of titleParts) {
         const cleaned = part.trim();
-        if (cleaned && cleaned.length > 2 && cleaned.length < 80
-            && !tabNames.has(cleaned.toLowerCase())) {
+        if (cleaned && cleaned.length > 2 && cleaned.length < 80 && !isTabName(cleaned)) {
           return cleaned;
         }
       }
@@ -261,16 +321,11 @@ async function discoverFromStudio(page, studioUrl) {
       if (titleParts.length >= 2) {
         const last = titleParts[titleParts.length - 1].trim();
         const secondLast = titleParts[titleParts.length - 2].trim();
-        if (secondLast && !tabNames.has(secondLast.toLowerCase()) && secondLast.length > 2) {
-          return secondLast;
-        }
-        if (last && !tabNames.has(last.toLowerCase()) && last.length > 2) {
-          return last;
-        }
+        if (secondLast && !isTabName(secondLast) && secondLast.length > 2) return secondLast;
+        if (last && !isTabName(last) && last.length > 2) return last;
       }
 
       // Strategy 3: Look for the agent name heading near the agent icon
-      // It appears as a large text element at the top of the agent detail page
       for (const sel of [
         'h1', 'h2',
         '[class*="agentName" i]', '[class*="botName" i]',
@@ -280,9 +335,7 @@ async function discoverFromStudio(page, studioUrl) {
         const el = document.querySelector(sel);
         if (el) {
           const t = el.textContent?.trim();
-          if (t && t.length > 2 && t.length < 80 && !tabNames.has(t.toLowerCase())) {
-            return t;
-          }
+          if (t && t.length > 2 && t.length < 80 && !isTabName(t)) return t;
         }
       }
       return '';
@@ -297,29 +350,80 @@ async function discoverFromStudio(page, studioUrl) {
     });
     discovered.description = descr;
 
+    // Read agent instructions from Overview tab
+    // Instructions live in a textarea or large text region labelled "Instructions"
+    const instrText = await page.evaluate(() => {
+      // Try labelled textarea first
+      for (const label of document.querySelectorAll('label, [class*="label" i], legend')) {
+        const text = label.textContent?.trim()?.toLowerCase() || '';
+        if (text.includes('instruction')) {
+          // Look for associated input/textarea via for= or sibling
+          const forId = label.getAttribute('for');
+          if (forId) {
+            const el = document.getElementById(forId);
+            if (el) return (el.value || el.textContent || '').trim().substring(0, 2000);
+          }
+          // Try next sibling or parent's textarea
+          const parent = label.closest('[class*="field" i], [class*="section" i], div') || label.parentElement;
+          if (parent) {
+            const ta = parent.querySelector('textarea, [contenteditable="true"], [class*="editor" i]');
+            if (ta) return (ta.value || ta.textContent || '').trim().substring(0, 2000);
+          }
+        }
+      }
+      // Fallback: any large textarea on the page (likely the instructions field)
+      const allTa = document.querySelectorAll('textarea, [contenteditable="true"]');
+      for (const ta of allTa) {
+        const val = (ta.value || ta.textContent || '').trim();
+        if (val.length > 50) return val.substring(0, 2000);
+      }
+      return '';
+    });
+    if (instrText) {
+      discovered.instructions = instrText;
+      console.log(`  ✓ Agent instructions read (${instrText.length} chars)`);
+    }
+
     // Navigate to Topics tab
+    await dismissPopups(page); // dismiss any popup that appeared after page load
     const topicsClicked = await clickFirst(page, [
       'button:has-text("Topics")', 'a:has-text("Topics")',
       '[role="tab"]:has-text("Topics")', '[aria-label*="Topics"]',
     ], 5000);
 
     if (topicsClicked) {
-      await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
       await page.waitForTimeout(3000);
 
       // Read topics and trigger phrases
       const topics = await page.evaluate(() => {
+        const SKIP = new Set([
+          'name', 'status', 'triggers', 'type', 'modified', 'author', 'actions',
+          'greeting', 'goodbye', 'escalate', 'fallback', 'start over',
+          'on', 'off', 'enabled', 'disabled', 'system', 'custom',
+        ]);
         const found = [];
         const rows = document.querySelectorAll('[data-testid*="topic"], [role="row"], tr');
         for (const row of rows) {
-          const cells = row.querySelectorAll('[role="gridcell"], td, > div');
+          // Prefer real table/grid cells over generic divs
+          let cells = row.querySelectorAll('[role="gridcell"], td');
+          if (cells.length === 0) cells = row.querySelectorAll('div');
           if (cells.length === 0) continue;
-          const name = cells[0]?.getAttribute('title') || cells[0]?.textContent?.trim()?.split('\n')[0]?.trim();
-          if (!name || name.length < 2 || name.length > 100) continue;
+
+          // Try title attribute first (most reliable in Studio), then text content
+          const firstCell = cells[0];
+          const titleAttr = firstCell?.getAttribute('title')?.trim();
+          const textContent = firstCell?.textContent?.trim()?.split('\n')[0]?.trim();
+          const name = (titleAttr && titleAttr.length > 2) ? titleAttr : textContent;
+
+          if (!name || name.length < 3 || name.length > 100) continue;
           const lower = name.toLowerCase();
+          // Skip known UI labels, system topics, single common words
+          if (SKIP.has(lower)) continue;
           if (lower.includes('greeting') || lower.includes('goodbye') ||
               lower.includes('escalate') || lower.includes('fallback') ||
-              lower.includes('start over') || lower === 'name' || lower === 'status') continue;
+              lower.includes('start over') || lower.includes('the agent')) continue;
+          // Skip if it looks like a sentence fragment or UI label (starts with article/verb)
+          if (/^(the |a |an |is |are |to |for |in |on |at |by |with |this |that )/i.test(name)) continue;
           found.push({ name, phrases: [] });
         }
         return found;
@@ -357,13 +461,13 @@ async function discoverFromStudio(page, studioUrl) {
     }
 
     // Navigate to Actions/Connections
+    await dismissPopups(page); // dismiss any popup that reappeared after Topics navigation
     const actionsClicked = await clickFirst(page, [
       'button:has-text("Actions")', 'a:has-text("Actions")',
       '[role="tab"]:has-text("Actions")', 'button:has-text("Connections")',
     ], 5000);
 
     if (actionsClicked) {
-      await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
       await page.waitForTimeout(3000);
 
       const connections = await page.evaluate((connMap) => {
@@ -388,7 +492,11 @@ async function discoverFromStudio(page, studioUrl) {
 
     console.log('');
   } catch (err) {
+    // Save screenshot of whatever the browser is showing so it's easy to diagnose
+    await page.screenshot({ path: DEBUG_SCREENSHOT, fullPage: false }).catch(() => {});
     console.log(`    ⚠ Could not read agent details from Copilot Studio.`);
+    console.log(`      Reason: ${err.message}`);
+    console.log(`      Debug screenshot: ${DEBUG_SCREENSHOT}`);
     console.log(`      Proceeding with M365 Copilot URL only.`);
     console.log(`      Demo will have fewer slides — you can add more later by editing demo.yaml\n`);
   }
@@ -473,14 +581,14 @@ async function askManualFallback(discovered) {
 }
 
 // ───────────────────────────────────────────
-// STEP 2C: Generate demo prompts via Anthropic API
+// STEP 2C: Generate demo script via Anthropic API
 // ───────────────────────────────────────────
 
-async function generateDemoPrompts(discovered) {
+async function generateDemoScript(discovered) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return null; // caller will use welcome screen prompts instead
 
-  console.log('  ● Generating demo prompts using AI...');
+  console.log('  ● Generating demo script using AI...');
 
   let Anthropic;
   try {
@@ -493,31 +601,53 @@ async function generateDemoPrompts(discovered) {
 
   const client = new Anthropic({ apiKey });
   const platforms = discovered.connections.map(c => c.platform).join(', ') || 'none detected';
+  const topicsSummary = discovered.topics.length > 0
+    ? discovered.topics.map(t => {
+        const phrases = t.phrases.length > 0 ? ` (e.g. "${t.phrases[0]}")` : '';
+        return `  - ${t.name}${phrases}`;
+      }).join('\n')
+    : '  (none discovered)';
 
   try {
     const response = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 1000,
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1500,
       messages: [{
         role: 'user',
-        content: `You are helping create a product demo for an AI agent.
+        content: `You are helping create a product demo for an AI agent. Your job is to design a realistic, flowing CONVERSATION that tells a compelling business story in a single chat thread.
 
 Agent name: ${discovered.name}
 Agent description: ${discovered.description || 'Not provided'}
 Agent instructions: ${discovered.instructions || 'Not provided'}
+Copilot Studio topics (agent capabilities):
+${topicsSummary}
 Connected platforms: ${platforms}
 
-Generate 3-5 realistic demo prompts that:
-1. Showcase the agent's most impressive capabilities
-2. Are written as a real user would type them
-3. Progress from simple to more complex
-4. Each prompt should produce a visually interesting response (lists, tables, summaries — not just yes/no)
-5. Are specific to THIS agent's actual purpose
+Design a conversation of 3–6 steps. The steps must flow logically as a real user session — each step builds on the previous response. The conversation should demonstrate a complete end-to-end workflow from discovery through to action.
 
-Also generate a one-sentence demo hook for the intro slide that would make a business decision maker want to watch.
+Rules:
+- Use [ENTITY] as a placeholder in a prompt when the actual value (e.g. a record name, licence number, person name) will only be known after reading the PREVIOUS step's agent response
+- Set extract_entity to true when THIS step's response will contain a SINGLE specific named item (one name, one ID, one record) that the NEXT step will reference with [ENTITY] — never use this for lists
+- entity_context must describe exactly ONE thing to extract (e.g. "first volunteer name", "licence name", "invoice number") — be specific so only one value is returned
+- CRITICAL: NEVER put [ENTITY] in a step's own prompt if that same step also has extract_entity:true. [ENTITY] only belongs in the prompt of the step AFTER the extraction step. Each step either extracts OR references [ENTITY] — never both.
+- Set capture_platform_after to the platform slug ONLY when this step causes a WRITE or visible change in that platform (a new record created, an email sent, a row updated) — do NOT use it for read-only queries or lookups
+- When a step sends an email or triggers an action that requires content (subject, recipient, body), the prompt MUST include all necessary details so the agent can proceed without asking follow-up questions. Do not say "can you send an email" alone — include purpose, recipient context, and tone (e.g. "Please send [ENTITY] a confirmation email letting them know they have been selected and to expect further instructions from the coordinator")
+- slide_label is a short business-level headline (≤8 words) shown in the demo viewer
+- Make prompts sound natural, like a real business user would type them
 
 Respond in JSON only, no markdown:
-{"hook": "one sentence that sells the demo", "prompts": [{"text": "the prompt text", "purpose": "what this prompt demonstrates", "slide_label": "short business-level headline for this slide"}]}`,
+{
+  "hook": "one sentence that sells this demo to a business decision maker",
+  "steps": [
+    {
+      "prompt": "the exact text to type in chat",
+      "slide_label": "short business headline",
+      "extract_entity": false,
+      "entity_context": null,
+      "capture_platform_after": null
+    }
+  ]
+}`,
       }],
     });
 
@@ -525,20 +655,143 @@ Respond in JSON only, no markdown:
     const cleaned = jsonStr.replace(/```json?\s*/g, '').replace(/```/g, '').trim();
     const result = JSON.parse(cleaned);
 
-    if (result.prompts && result.prompts.length > 0) {
+    if (result.steps && result.steps.length > 0) {
       console.log('');
-      console.log('  ✓ Generated demo prompts:');
-      result.prompts.forEach((p, i) => {
-        console.log(`    ${i + 1}. "${p.text}"`);
-        console.log(`       → ${p.purpose}`);
+      console.log('  ✓ Generated demo script:');
+      result.steps.forEach((s, i) => {
+        console.log(`    ${i + 1}. "${s.prompt.substring(0, 70)}${s.prompt.length > 70 ? '...' : ''}"`);
+        console.log(`       → ${s.slide_label}`);
+        if (s.extract_entity) console.log(`       → extracts: ${s.entity_context}`);
+        if (s.capture_platform_after) console.log(`       → platform capture after: ${s.capture_platform_after}`);
       });
       console.log('');
       return result;
     }
   } catch (err) {
-    console.log(`    ⚠ Prompt generation failed: ${err.message?.substring(0, 60)}`);
+    console.log(`    ⚠ Script generation failed: ${err.message}`);
   }
 
+  return null;
+}
+
+// ───────────────────────────────────────────
+// Content-aware follow-through helpers
+// ───────────────────────────────────────────
+
+/**
+ * Single AI call that reads the agent's response and decides:
+ * - Is the intended action already complete?
+ * - If not, what follow-up message should the user send?
+ *
+ * Returns { complete: boolean, followUp: string | null }
+ * Falls back to { complete: false, followUp: null } on API failure so the
+ * caller can still take the screenshot and move on rather than looping forever.
+ */
+async function analyzeAgentResponse(agentResponse, stepGoal, platform, agentName, contextHint) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return { complete: false, followUp: null };
+
+  try {
+    const mod = await import('@anthropic-ai/sdk');
+    const Anthropic = mod.default || mod.Anthropic;
+    const client = new Anthropic({ apiKey });
+
+    const resp = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 300,
+      messages: [{
+        role: 'user',
+        content: `You are helping automate a product demo for an AI agent called "${agentName}".
+
+The goal of the current demo step is: "${stepGoal}"
+The expected platform action when complete: ${platform}
+Demo context: ${contextHint || 'No additional context.'}
+
+The agent just responded with:
+"""
+${agentResponse.substring(0, 1000)}
+"""
+
+Answer these two questions in JSON (no markdown):
+1. "complete": true if the agent has already performed the requested action (e.g. sent the email, updated the record, triggered the flow) — false if it is still asking for information or confirmation.
+2. "follow_up": if complete is false, write the exact message the user should send next to give the agent what it needs (1–3 natural sentences using realistic demo data). If complete is true, set to null.
+
+{ "complete": true|false, "follow_up": "..." | null }`,
+      }],
+    });
+
+    const raw = (resp.content[0]?.text || '').trim();
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      return {
+        complete: !!parsed.complete,
+        followUp: parsed.follow_up || null,
+      };
+    }
+  } catch (err) {
+    console.log(`    ⚠ Follow-through analysis failed: ${err.message?.substring(0, 60)}`);
+  }
+
+  return { complete: false, followUp: null };
+}
+
+// ───────────────────────────────────────────
+// Entity extraction helper
+// ───────────────────────────────────────────
+
+async function extractEntityFromResponse(responseText, entityContext) {
+  if (!responseText || !entityContext) return null;
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (apiKey) {
+    try {
+      const mod = await import('@anthropic-ai/sdk');
+      const Anthropic = mod.default || mod.Anthropic;
+      const client = new Anthropic({ apiKey });
+      const resp = await client.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 60,
+        messages: [{
+          role: 'user',
+          content: `Extract the ${entityContext} from this text. Reply with ONLY the extracted value — no explanation, no punctuation, no quotes.\n\nText:\n${responseText.substring(0, 1200)}`,
+        }],
+      });
+      const extracted = (resp.content[0]?.text || '').trim();
+      if (extracted && extracted.length > 0 && extracted.length < 120) {
+        console.log(`    ✓ Extracted ${entityContext}: "${extracted}"`);
+        return extracted;
+      }
+    } catch (err) {
+      console.log(`    ⚠ Entity extraction failed: ${err.message?.substring(0, 50)}`);
+    }
+  }
+
+  // Regex fallback
+  // 1. Bold markdown: **Some Value**
+  const boldMatch = responseText.match(/\*\*([^*\n]{2,80})\*\*/);
+  if (boldMatch) {
+    const val = boldMatch[1].trim();
+    console.log(`    ✓ Extracted (bold) ${entityContext}: "${val}"`);
+    return val;
+  }
+  // 2. First list item: "- Something" or "1. Something" or "• Something"
+  const listMatch = responseText.match(/^[\-\*•][ \t]+(.+)|^\d+\.\s+(.+)/m);
+  if (listMatch) {
+    const val = (listMatch[1] || listMatch[2]).trim();
+    if (val.length > 1 && val.length < 100) {
+      console.log(`    ✓ Extracted (list item) ${entityContext}: "${val}"`);
+      return val;
+    }
+  }
+  // 3. Capitalized multi-word phrase
+  const capMatch = responseText.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b/);
+  if (capMatch) {
+    console.log(`    ✓ Extracted (phrase) ${entityContext}: "${capMatch[1]}"`);
+    return capMatch[1];
+  }
+
+  console.log(`    ⚠ Could not extract ${entityContext} from response`);
   return null;
 }
 
@@ -651,26 +904,24 @@ async function waitForAgentResponse(page, maxSeconds = 120) {
   return { complete: responseComplete, lastMsgText, elapsed };
 }
 
-/** Scroll the last agent response to the top of the viewport, then screenshot */
+/** Scroll the conversation to show the latest agent response, then screenshot */
 async function scrollAndScreenshot(page, screenshotPath) {
+  // Scroll every scrollable container on the page to its bottom.
+  // M365 Copilot keeps messages in a scrollable inner div — we don't know
+  // its exact selector so we blast all of them.
   await page.evaluate(() => {
-    const msgSelectors = [
-      '[data-testid*="assistant"]', '[class*="assistant" i]',
-      '[class*="agent-message" i]', '[class*="bot-message" i]',
-      '[class*="copilot" i][class*="message" i]',
-      '[data-testid*="message"]', '[class*="message" i]',
-      '[class*="response" i]', '[role="listitem"]',
-    ];
-    for (const sel of msgSelectors) {
-      const els = document.querySelectorAll(sel);
-      if (els.length > 0) {
-        els[els.length - 1].scrollIntoView({ behavior: 'instant', block: 'start' });
-        return;
+    const all = document.querySelectorAll('*');
+    for (const el of all) {
+      if (el.scrollHeight > el.clientHeight + 10) {
+        el.scrollTop = el.scrollHeight;
       }
     }
     window.scrollTo(0, document.body.scrollHeight);
   }).catch(() => {});
-  await page.waitForTimeout(1500);
+
+  // Also use keyboard End to ensure the viewport follows
+  await page.keyboard.press('End').catch(() => {});
+  await page.waitForTimeout(2000);
 
   await page.screenshot({ path: screenshotPath, fullPage: false });
 
@@ -755,7 +1006,7 @@ async function detectConnectionRequest(page) {
 }
 
 /** Pause and show connection approval instructions */
-async function handleConnectionRequest(page, platform, slideId, screenshotsDir) {
+async function handleConnectionRequest(page, platform, slideId, screenshotsDir, headless = false) {
   // 1. Screenshot the connection request (browser stays OPEN)
   const ssPath = path.join(screenshotsDir, `${slideId}-connection-request.png`);
   await page.screenshot({ path: ssPath }).catch(() => {});
@@ -802,20 +1053,93 @@ async function handleConnectionRequest(page, platform, slideId, screenshotsDir) 
 
   const displayPlatform = detectedName || platform || 'your connected platform';
 
-  // 3. Print pause message — browser is still open and visible
+  // 3a. Try to auto-click the "Connect to continue" button/card in chat
+  const autoClicked = await page.evaluate(() => {
+    const CONNECT_TEXTS = ['connect to continue', 'connect', 'authorize', 'sign in'];
+    // Try buttons and role="button" elements first (most specific)
+    const candidates = document.querySelectorAll('button, [role="button"], a');
+    for (const el of candidates) {
+      if (!el.offsetParent) continue; // skip hidden
+      const t = (el.textContent || '').trim().toLowerCase();
+      if (CONNECT_TEXTS.some(ct => t === ct || t === ct + ' to continue')) {
+        el.click();
+        return true;
+      }
+    }
+    // Try adaptive card action buttons (Copilot Studio connector approval cards)
+    const actionEls = document.querySelectorAll(
+      '[class*="adaptiveCard"] button, [class*="adaptive-card"] button, ' +
+      '[data-testid*="adaptive"] button, [class*="card-action" i], ' +
+      '[class*="cardAction" i], [class*="ac-pushButton" i]'
+    );
+    for (const el of actionEls) {
+      if (!el.offsetParent) continue;
+      const t = (el.textContent || '').trim().toLowerCase();
+      if (CONNECT_TEXTS.some(ct => t.includes(ct))) {
+        el.click();
+        return true;
+      }
+    }
+    // Last resort: click any visible element containing "connect to continue" text
+    const allEls = document.querySelectorAll('*');
+    for (const el of allEls) {
+      if (!el.offsetParent) continue;
+      if (el.children.length > 0) continue; // leaf nodes only
+      const t = (el.textContent || '').trim().toLowerCase();
+      if (t === 'connect to continue' || t === 'connect') {
+        el.click();
+        return true;
+      }
+    }
+    return false;
+  }).catch(() => false);
+
+  if (autoClicked) {
+    console.log('  ↪ Auto-clicked "Connect to continue" — waiting for connection to establish...');
+    await page.waitForTimeout(6000);
+    // Check if connection was established (page may have reloaded or response appeared)
+    const stillConnecting = await detectConnectionRequest(page).catch(() => ({ detected: false }));
+    if (!stillConnecting.detected) {
+      console.log('  ✓ Connection established automatically');
+      return { ssPath, platform: displayPlatform, autoApproved: true };
+    }
+    console.log('  ⚠ Auto-click did not resolve the connection — falling back to manual approval');
+  }
+
+  // 3b. Print pause message (auto-click failed or not available)
   console.log('');
-  console.log('  ┌─────────────────────────────────────────────┐');
-  console.log('  │  ⚠ CONNECTION APPROVAL REQUIRED             │');
-  console.log('  │                                             │');
-  console.log(`  │  The agent needs you to approve a           │`);
-  console.log(`  │  connection to: ${displayPlatform.substring(0, 27).padEnd(27)}│`);
-  console.log('  │                                             │');
-  console.log('  │  Steps:                                     │');
-  console.log('  │  1. Look at the browser window              │');
-  console.log('  │  2. Click "Connect" or follow the link      │');
-  console.log('  │  3. Complete the authorization flow         │');
-  console.log('  │  4. Return here and press Enter to retry    │');
-  console.log('  └─────────────────────────────────────────────┘');
+  if (headless) {
+    // In headless mode the user can't see or interact with the browser window
+    console.log('  ┌──────────────────────────────────────────────────────────────┐');
+    console.log('  │  ⚠ CONNECTION APPROVAL REQUIRED (headless mode)              │');
+    console.log('  │                                                              │');
+    console.log(`  │  The agent needs a connection approval to:                   │`);
+    console.log(`  │  ${displayPlatform.substring(0, 60).padEnd(60)}│`);
+    console.log('  │                                                              │');
+    console.log('  │  This cannot be done in headless mode. Choose one option:    │');
+    console.log('  │                                                              │');
+    console.log('  │  Option 1: Re-run create_demo with headless: false           │');
+    console.log('  │            This opens a visible browser so you can approve.  │');
+    console.log('  │                                                              │');
+    console.log('  │  Option 2: In a separate terminal run:                       │');
+    console.log('  │    agentdemo auth --approve-connections --m365-url <url>     │');
+    console.log('  │    Approve the connection there, then press Enter here.      │');
+    console.log('  │                                                              │');
+    console.log('  └──────────────────────────────────────────────────────────────┘');
+  } else {
+    console.log('  ┌─────────────────────────────────────────────┐');
+    console.log('  │  ⚠ CONNECTION APPROVAL REQUIRED             │');
+    console.log('  │                                             │');
+    console.log(`  │  The agent needs you to approve a           │`);
+    console.log(`  │  connection to: ${displayPlatform.substring(0, 27).padEnd(27)}│`);
+    console.log('  │                                             │');
+    console.log('  │  Steps:                                     │');
+    console.log('  │  1. Look at the browser window              │');
+    console.log('  │  2. Click "Connect" or follow the link      │');
+    console.log('  │  3. Complete the authorization flow         │');
+    console.log('  │  4. Return here and press Enter to retry    │');
+    console.log('  └─────────────────────────────────────────────┘');
+  }
 
   // 4. BLOCKING WAIT — nothing runs until user presses Enter
   await waitForEnter('  Approve the connection in the browser, then:');
@@ -824,7 +1148,132 @@ async function handleConnectionRequest(page, platform, slideId, screenshotsDir) 
   return { ssPath, platform: displayPlatform };
 }
 
-async function autoCapture(page, m365Url, discovered, demoDir, generatedPrompts = null) {
+/**
+ * Opens a separate browser context for the recipient/volunteer account,
+ * waits for a new email to appear in their Outlook inbox, and screenshots it.
+ * Returns the screenshot path, or null if the session is invalid or capture fails.
+ */
+async function captureRecipientInbox(recipientUrl, profile, slideId, screenshotsDir, discovered) {
+  console.log(`\n  ● Slide ${slideId} — Outlook inbox (recipient profile "${profile}")`);
+  let recipientBrowser, recipientContext;
+  try {
+    const opened = await createBrowserContext({ headless: true, profile });
+    recipientBrowser = opened.browser;
+    recipientContext = opened.context;
+  } catch (err) {
+    console.log(`    ⚠ Could not open recipient browser context: ${err.message}`);
+    return null;
+  }
+
+  // Check session validity against the actual recipient URL (Outlook), not office.com,
+  // because the saved session may only have cookies for outlook.office.com.
+  const sessionOk = await (async () => {
+    const checkPage = await recipientContext.newPage();
+    try {
+      await checkPage.goto(recipientUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await checkPage.waitForTimeout(3000);
+      const landed = checkPage.url();
+      await checkPage.close();
+      return !landed.includes('login.microsoftonline.com') && !landed.includes('login.live.com');
+    } catch {
+      await checkPage.close().catch(() => {});
+      return false;
+    }
+  })();
+  if (!sessionOk) {
+    console.log(`    ⚠ Recipient session invalid for profile "${profile}". Run: agentdemo auth --profile ${profile}`);
+    await recipientBrowser.close().catch(() => {});
+    return null;
+  }
+
+  const ssPath = path.join(screenshotsDir, `${slideId}-outlook-recipient.png`);
+  let page;
+  try {
+    page = await recipientContext.newPage();
+    await page.goto(recipientUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.waitForLoadState('networkidle').catch(() => {});
+
+    if (page.url().includes('login.microsoftonline.com') || page.url().includes('login.live.com')) {
+      console.log(`    ⚠ Recipient session expired — redirected to login.`);
+      await page.close();
+      await recipientBrowser.close().catch(() => {});
+      return null;
+    }
+
+    // Poll up to 90s (every 5s) for a new email to appear at the top of the inbox
+    const EMAIL_SELECTORS = [
+      '[role="listbox"] [role="option"]',
+      '[role="list"] [role="listitem"]',
+      '[data-convid]',
+      '.ms-List-cell',
+    ];
+    const POLL_INTERVAL = 5000;
+    const POLL_TIMEOUT = 90000;
+    const pollStart = Date.now();
+    let emailFound = false;
+
+    console.log(`    Waiting up to 90s for email to arrive in recipient inbox...`);
+    while (!emailFound && (Date.now() - pollStart) < POLL_TIMEOUT) {
+      for (const sel of EMAIL_SELECTORS) {
+        try {
+          const el = await page.$(sel);
+          if (el) { emailFound = true; break; }
+        } catch { /* try next */ }
+      }
+      if (!emailFound) {
+        await page.waitForTimeout(POLL_INTERVAL);
+        // Refresh inbox view
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+        await page.waitForLoadState('networkidle').catch(() => {});
+      }
+    }
+
+    if (emailFound) {
+      console.log(`    ✓ Email detected in recipient inbox`);
+      // Click the first/top email to open it so the content is visible in the screenshot
+      const OPEN_SELECTORS = [
+        '[data-convid]',
+        '[role="listbox"] [role="option"]',
+        '[role="list"] [role="listitem"]',
+        '.ms-List-cell',
+      ];
+      let opened = false;
+      for (const sel of OPEN_SELECTORS) {
+        try {
+          const el = await page.$(sel);
+          if (el) {
+            await el.click();
+            await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+            await page.waitForTimeout(3000);
+            opened = true;
+            console.log(`    ✓ Email opened`);
+            break;
+          }
+        } catch { /* try next */ }
+      }
+      if (!opened) {
+        console.log(`    ⚠ Could not open email — screenshotting inbox list view`);
+      }
+    } else {
+      console.log(`    ⚠ No email detected after 90s — screenshotting inbox anyway`);
+    }
+
+    await page.screenshot({ path: ssPath });
+    console.log(`    ✓ Recipient inbox screenshot saved`);
+    await page.close();
+  } catch (err) {
+    console.log(`    ⚠ Recipient inbox capture failed: ${err.message}`);
+    if (page) await page.close().catch(() => {});
+    await recipientBrowser.close().catch(() => {});
+    return null;
+  }
+
+  await recipientBrowser.close().catch(() => {});
+  return ssPath;
+}
+
+async function autoCapture(page, m365Url, discovered, demoDir, generatedScript = null, headless = false, captureOpts = {}) {
+  const { outlookRecipientUrl, outlookRecipientProfile = 'recipient' } = captureOpts;
   const screenshotsDir = path.join(demoDir, 'screenshots');
   const clipsDir = path.join(demoDir, 'clips');
   fs.mkdirSync(screenshotsDir, { recursive: true });
@@ -844,136 +1293,89 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedPrompts 
     'custom': 'Custom Platform',
   };
 
-  // ── Capture connected platform slides first ──
-  const platformConns = discovered.connections.filter(c => c.platform !== 'm365-copilot');
-  if (platformConns.length > 0) {
-    console.log('  ● Capturing supporting platforms...\n');
-  }
-
-  for (const conn of platformConns) {
+  // ── Platform capture helper — opens a new tab, screenshots, closes it ──
+  // Keeps the main M365 chat page intact throughout the entire capture.
+  async function capturePlatformInNewTab(conn, ssPath) {
     const platform = conn.platform;
-    const displayName = PLATFORM_DISPLAY[platform] || platform;
+    const tab = await page.context().newPage();
+    try {
+      await maximizeWindow(tab);
+      await tab.goto(conn.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await tab.waitForLoadState('networkidle').catch(() => {});
 
-    if (conn.url) {
-      // ── Live capture for this platform ──
-      console.log(`  ● Slide ${slideId} — ${displayName}`);
-      console.log(`    Navigating to ${displayName}...`);
+      if (tab.url().includes('login.microsoftonline.com') || tab.url().includes('login.live.com')) {
+        throw new Error('Auth expired — redirected to login');
+      }
 
-      const ssFilename = `${slideId}-${platform}-final.png`;
-      const ssPath = path.join(screenshotsDir, ssFilename);
-      let captured = false;
-
-      try {
-        await page.goto(conn.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-        await page.waitForLoadState('networkidle').catch(() => {});
-
-        // Check for auth redirect
-        if (page.url().includes('login.microsoftonline.com') || page.url().includes('login.live.com')) {
-          throw new Error('Auth expired — redirected to login');
-        }
-
-        // Platform-specific wait and prep
-        if (platform === 'sharepoint') {
-          await page.waitForTimeout(3000);
-          // Wait for list/table content
+      if (platform === 'sharepoint') {
+        await tab.waitForTimeout(3000);
+        // SharePoint list selectors — also handle Excel Online (longer load, different DOM)
+        const isExcel = conn?.url && (conn.url.includes('.xlsx') || conn.url.includes('.xls') || conn.url.includes('Doc.aspx'));
+        if (isExcel) {
+          // Excel Online: wait for spreadsheet canvas or toolbar
+          const xlSelectors = ['[id="WACViewPanel"]', '.WACViewPanel', '[data-testid="ExcelViewport"]', '.xl-sheets-container', '[role="main"]'];
+          for (const sel of xlSelectors) {
+            try { await tab.waitForSelector(sel, { timeout: 20000 }); break; } catch { /* next */ }
+          }
+          await tab.waitForTimeout(4000); // extra time for Excel to fully render
+        } else {
           const spSelectors = ['[role="grid"]', '.ms-List', '.ms-DetailsList', 'table', '[data-automationid="ListCell"]'];
           for (const sel of spSelectors) {
-            try { await page.waitForSelector(sel, { timeout: 10000 }); break; } catch { /* next */ }
+            try { await tab.waitForSelector(sel, { timeout: 10000 }); break; } catch { /* next */ }
           }
-          await page.waitForTimeout(2000);
-          // Scroll down to hide toolbar, show more rows
-          await page.evaluate(() => window.scrollBy(0, 200));
-          await page.waitForTimeout(1000);
-
-        } else if (platform === 'power-automate') {
-          await page.waitForTimeout(3000);
-          // Wait for flows LIST table
-          const paSelectors = ['[role="grid"]', '.ms-DetailsRow', '[data-automationid]', 'table', '.ms-List', '.ms-DetailsList'];
-          for (const sel of paSelectors) {
-            try { await page.waitForSelector(sel, { timeout: 10000 }); break; } catch { /* next */ }
-          }
-          await page.waitForTimeout(2000);
-          // Mask sensitive data
-          for (const sel of ['[data-testid="connection-string"]', '[class*="credential"]', '[class*="secret"]', 'input[type="password"]']) {
-            const els = await page.$$(sel);
-            for (const el of els) { await el.evaluate(n => { n.style.visibility = 'hidden'; }); }
-          }
-
-        } else if (platform === 'teams') {
-          await page.waitForTimeout(5000);
-          const tSelectors = ['[data-tid="messageBodyContent"]', '[role="main"]', '.message-body', '.ts-message-list-container'];
-          for (const sel of tSelectors) {
-            try { await page.waitForSelector(sel, { timeout: 15000 }); break; } catch { /* next */ }
-          }
-          await page.waitForTimeout(2000);
-
-        } else if (platform === 'outlook') {
-          await page.waitForTimeout(5000);
-          const oSelectors = ['[role="listbox"]', '[data-testid="MailList"]', '.customScrollBar', '[aria-label*="Message list"]', '[role="main"]'];
-          for (const sel of oSelectors) {
-            try { await page.waitForSelector(sel, { timeout: 15000 }); break; } catch { /* next */ }
-          }
-          await page.waitForTimeout(2000);
-
-        } else {
-          // xero, custom, generic
-          await page.waitForTimeout(3000);
+          await tab.waitForTimeout(2000);
+          await tab.evaluate(() => window.scrollBy(0, 200));
+          await tab.waitForTimeout(1000);
         }
 
-        console.log('    ✓ Page loaded');
-        await page.screenshot({ path: ssPath, fullPage: false });
-        console.log('    ✓ Screenshot saved');
-        captured = true;
-      } catch (err) {
-        console.log(`    ✗ Capture failed: ${err.message}`);
-        console.log(`    → Creating placeholder instead`);
+      } else if (platform === 'power-automate') {
+        await tab.waitForTimeout(3000);
+        const paSelectors = ['[role="grid"]', '.ms-DetailsRow', '[data-automationid]', 'table', '.ms-List', '.ms-DetailsList'];
+        for (const sel of paSelectors) {
+          try { await tab.waitForSelector(sel, { timeout: 10000 }); break; } catch { /* next */ }
+        }
+        await tab.waitForTimeout(2000);
+        for (const sel of ['[data-testid="connection-string"]', '[class*="credential"]', '[class*="secret"]', 'input[type="password"]']) {
+          const els = await tab.$$(sel);
+          for (const el of els) { await el.evaluate(n => { n.style.visibility = 'hidden'; }); }
+        }
+
+      } else if (platform === 'teams') {
+        await tab.waitForTimeout(5000);
+        const tSelectors = ['[data-tid="messageBodyContent"]', '[role="main"]', '.message-body', '.ts-message-list-container'];
+        for (const sel of tSelectors) {
+          try { await tab.waitForSelector(sel, { timeout: 15000 }); break; } catch { /* next */ }
+        }
+        await tab.waitForTimeout(2000);
+
+      } else if (platform === 'outlook') {
+        await tab.waitForTimeout(5000);
+        const oSelectors = ['[role="listbox"]', '[data-testid="MailList"]', '.customScrollBar', '[aria-label*="Message list"]', '[role="main"]'];
+        for (const sel of oSelectors) {
+          try { await tab.waitForSelector(sel, { timeout: 15000 }); break; } catch { /* next */ }
+        }
+        await tab.waitForTimeout(2000);
+
+      } else {
+        await tab.waitForTimeout(3000);
       }
 
-      if (captured) {
-        slides.push({
-          id: slideId++,
-          platform,
-          type: 'platform',
-          placeholder: false,
-          connectorName: conn.name,
-          screenshot: ssPath,
-          clip: null,
-          prompt: null,
-          callout: null,
-        });
-      } else {
-        slides.push({
-          id: slideId++,
-          platform,
-          type: 'platform',
-          placeholder: true,
-          connectorName: conn.name,
-          screenshot: null,
-          clip: null,
-          prompt: null,
-          callout: null,
-          placeholderInfo: null,
-        });
-      }
-    } else {
-      // ── No URL — placeholder slide ──
-      console.log(`  ● Slide ${slideId} — ${displayName}`);
-      slides.push({
-        id: slideId++,
-        platform,
-        type: 'platform',
-        placeholder: true,
-        connectorName: conn.name,
-        screenshot: null,
-        clip: null,
-        prompt: null,
-        callout: null,
-        placeholderInfo: null,
-      });
-      console.log(`    → Placeholder (needs manual screenshot)`);
+      await tab.screenshot({ path: ssPath, fullPage: false });
+      console.log('    ✓ Page loaded');
+      console.log('    ✓ Screenshot saved');
+      return true;
+    } catch (err) {
+      console.log(`    ✗ Platform tab capture failed: ${err.message}`);
+      return false;
+    } finally {
+      await tab.close().catch(() => {});
     }
-    console.log('');
   }
+
+  // Platform connections are captured AFTER the welcome screen (below),
+  // using new tabs so the M365 chat page is never navigated away.
+  const platformConns = discovered.connections.filter(c => c.platform !== 'm365-copilot');
+
 
   // ── Capture M365 Copilot agent interaction slides ──
   console.log('  ● Capturing M365 Copilot...\n');
@@ -984,6 +1386,59 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedPrompts 
     await page.waitForLoadState('networkidle').catch(() => {});
     await page.waitForTimeout(8000);
     await dismissPopups(page);
+
+    // ── SLIDE 1: Welcome screen (before any prompt) ──
+    const welcomeSsPath = path.join(screenshotsDir, `${slideId}-m365-welcome.png`);
+    await page.screenshot({ path: welcomeSsPath, fullPage: false });
+    console.log(`  ✓ Slide ${slideId} — Welcome screen captured`);
+    slides.push({
+      id: slideId++,
+      platform: 'm365-copilot',
+      type: 'agent',
+      screenshot: welcomeSsPath,
+      clip: null,
+      prompt: null,
+      callout: null,
+      storyLabel: 'Meet your AI agent',
+    });
+
+    // ── Platform slides — captured in new tabs so chat page stays open ──
+    if (platformConns.length > 0) {
+      console.log('\n  ● Capturing supporting platforms...\n');
+    }
+    for (const conn of platformConns) {
+      const platform = conn.platform;
+      const displayName = PLATFORM_DISPLAY[platform] || platform;
+
+      // Skip the coordinator's Outlook initial slide when a recipient inbox is configured —
+      // the recipient's open email is a more meaningful Outlook proof-point.
+      if (platform === 'outlook' && outlookRecipientUrl) {
+        console.log(`  ● Slide — Outlook (initial) skipped — recipient inbox will be shown instead\n`);
+        continue;
+      }
+
+      console.log(`  ● Slide ${slideId} — ${displayName}`);
+      if (conn.url) {
+        console.log(`    Navigating to ${displayName} in new tab...`);
+        const ssFilename = `${slideId}-${platform}-initial.png`;
+        const ssPath = path.join(screenshotsDir, ssFilename);
+        const captured = await capturePlatformInNewTab(conn, ssPath);
+        slides.push({
+          id: slideId++, platform, type: 'platform',
+          placeholder: !captured, connectorName: conn.name,
+          screenshot: captured ? ssPath : null,
+          clip: null, prompt: null, callout: null, placeholderInfo: null,
+        });
+      } else {
+        slides.push({
+          id: slideId++, platform, type: 'platform',
+          placeholder: true, connectorName: conn.name,
+          screenshot: null, clip: null, prompt: null, callout: null, placeholderInfo: null,
+        });
+        console.log(`    → Placeholder (needs manual screenshot)`);
+      }
+      console.log('');
+    }
 
     // Find chat input — try targeted selectors in order.
     // M365 Copilot uses a Lexical rich text editor, so the actual input
@@ -1034,7 +1489,7 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedPrompts 
       // Pre-check: detect connection requests on the welcome screen
       const preCheck = await detectConnectionRequest(page);
       if (preCheck.detected) {
-        const connResult = await handleConnectionRequest(page, preCheck.platform, 'pre', screenshotsDir);
+        const connResult = await handleConnectionRequest(page, preCheck.platform, 'pre', screenshotsDir, headless);
         connectionEvents.push({ platform: connResult.platform, screenshotPath: connResult.ssPath });
         await page.goto(m365Url, { waitUntil: 'domcontentloaded', timeout: 60000 });
         await page.waitForLoadState('networkidle').catch(() => {});
@@ -1079,35 +1534,29 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedPrompts 
         screenshot: ssPath, clip: null, prompt: null, callout: null,
       });
     } else {
-      // ── Collect prompts — three strategies in priority order ──
-      let prompts = [];
-      let promptLabels = {}; // prompt text → slide label
+      // ── Build steps — three strategies in priority order ──
+      let steps = [];
 
-      // Strategy 1: Use AI-generated prompts if available
-      if (generatedPrompts && generatedPrompts.prompts && generatedPrompts.prompts.length > 0) {
-        for (const p of generatedPrompts.prompts) {
-          prompts.push(p.text);
-          promptLabels[p.text] = p.slide_label || '';
-        }
-        console.log(`  Using ${prompts.length} AI-generated prompts`);
+      // Strategy 1: AI-generated conversation script
+      if (generatedScript && generatedScript.steps && generatedScript.steps.length > 0) {
+        steps = generatedScript.steps.slice(0, 12);
+        console.log(`  Using ${steps.length} AI-generated script steps`);
       }
 
-      // Strategy 2: Use discovered trigger phrases from Copilot Studio
-      if (prompts.length === 0 && discovered.topics.length > 0) {
+      // Strategy 2: Copilot Studio topic phrases
+      if (steps.length === 0 && discovered.topics.length > 0) {
         for (const topic of discovered.topics) {
-          if (topic.phrases.length > 0) {
-            prompts.push(...topic.phrases.slice(0, 2));
-          } else if (topic.name.length > 5) {
-            prompts.push(topic.name);
-          }
+          const text = topic.phrases.length > 0 ? topic.phrases[0] : (topic.name.length > 5 ? topic.name : null);
+          if (text) steps.push({ prompt: text, slide_label: topic.name || '', extract_entity: false, entity_context: null, capture_platform_after: null });
         }
-        if (prompts.length > 0) {
-          console.log(`  Using ${prompts.length} prompts from Copilot Studio topics`);
+        if (steps.length > 0) {
+          steps = steps.slice(0, 5);
+          console.log(`  Using ${steps.length} steps from Copilot Studio topics`);
         }
       }
 
-      // Strategy 3: Read starter prompts from M365 Copilot welcome screen
-      if (prompts.length === 0) {
+      // Strategy 3: Starter prompts from agent welcome screen
+      if (steps.length === 0) {
         console.log('  ● Reading starter prompts from agent welcome screen...');
         const starterPrompts = await page.evaluate(() => {
           const found = [];
@@ -1121,104 +1570,82 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedPrompts 
             const els = document.querySelectorAll(sel);
             for (const el of els) {
               const t = el.textContent?.trim();
-              if (t && t.length > 5 && t.length < 150 && !found.includes(t)) {
-                found.push(t);
-              }
+              if (t && t.length > 5 && t.length < 150 && !found.includes(t)) found.push(t);
             }
             if (found.length > 0) break;
           }
-          // Fallback: look for any clickable elements in the welcome area with short text
           if (found.length === 0) {
             const buttons = document.querySelectorAll('button, [role="button"]');
             for (const b of buttons) {
               const t = b.textContent?.trim();
-              if (t && t.length > 10 && t.length < 120 && !t.toLowerCase().includes('send')
-                  && !t.toLowerCase().includes('attach') && !t.toLowerCase().includes('mic')) {
-                found.push(t);
-              }
+              if (t && t.length > 10 && t.length < 120
+                  && !t.toLowerCase().includes('send') && !t.toLowerCase().includes('attach')
+                  && !t.toLowerCase().includes('mic')) found.push(t);
             }
           }
           return found.slice(0, 5);
         }).catch(() => []);
 
         if (starterPrompts.length > 0) {
-          prompts = starterPrompts;
-          console.log(`  ✓ Found ${prompts.length} starter prompts from welcome screen`);
+          steps = starterPrompts.map(t => ({ prompt: t, slide_label: '', extract_entity: false, entity_context: null, capture_platform_after: null }));
+          console.log(`  ✓ Found ${steps.length} starter prompts from welcome screen`);
         } else {
-          // Absolute last resort: use agent name as prompt context
-          prompts = [`Tell me about your capabilities and what you can help with`];
+          steps = [{ prompt: 'Tell me about your capabilities and what you can help with', slide_label: '', extract_entity: false, entity_context: null, capture_platform_after: null }];
           console.log('  ⚠ No starter prompts found. Using generic prompt.');
         }
       }
 
-      // Limit to 5 prompts max
-      prompts = prompts.slice(0, 5);
-
-      const totalPrompts = prompts.length;
-      const RESPONSE_TIMEOUT = 120; // 2 minutes max wait
+      const RESPONSE_TIMEOUT = 120;
       const ERROR_PHRASES = ['something went wrong', "i'm having trouble", "couldn't complete", 'connection failed'];
 
-      // Selectors for the "New chat" button to start a fresh conversation per prompt
-      const NEW_CHAT_SELS = [
-        '[aria-label*="New chat" i]',
-        '[title*="New chat" i]',
-        'button:has-text("New chat")',
-        '[data-testid*="new-chat"]',
-        '[data-testid*="newChat"]',
-      ].join(',');
+      // Carries the last extracted entity forward across steps
+      let extractedEntity = null;
 
-      for (let i = 0; i < prompts.length; i++) {
-        const prompt = prompts[i];
+      for (let i = 0; i < steps.length; i++) {
+        const step = steps[i];
+
+        // Substitute [ENTITY] with the extracted value from the previous step
+        let promptText = step.prompt;
+        if (extractedEntity && promptText.includes('[ENTITY]')) {
+          promptText = promptText.replace(/\[ENTITY\]/g, extractedEntity);
+        }
+
         console.log(`\n  ● Slide ${slideId} — M365 Copilot`);
-        console.log(`    Typing prompt: "${prompt.substring(0, 60)}${prompt.length > 60 ? '...' : ''}"`);
+        if (step.slide_label) console.log(`    "${step.slide_label}"`);
+        console.log(`    Typing prompt: "${promptText.substring(0, 60)}${promptText.length > 60 ? '...' : ''}"`);
 
         try {
-          // Start a fresh chat for each prompt (except the first)
-          // so each slide shows one clean exchange only
-          if (i > 0) {
-            // Navigate fresh to the agent URL for a clean conversation
-            await page.goto(m365Url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-            await page.waitForLoadState('networkidle').catch(() => {});
-            await page.waitForTimeout(5000);
-            await dismissPopups(page);
-            await verifyAgentLoaded(page, discovered.name, m365Url);
-          }
-
-          // Type prompt — always re-query the input (fresh locator, no stale refs)
-          // M365 Copilot uses a Lexical rich text editor which intercepts
-          // keyboard events. fill() does not work — must use keyboard.type().
+          // ── All prompts stay in the SAME chat thread ──
+          // M365 Copilot uses a Lexical rich text editor — fill() won't work.
           const inputLocator = page.locator(INPUT_SEL).last();
           await inputLocator.waitFor({ state: 'visible', timeout: 15000 });
           await inputLocator.click();
           await page.waitForTimeout(300);
-          // Select all existing text and clear it before typing
           await page.keyboard.press('Control+A');
           await page.keyboard.press('Backspace');
           await page.waitForTimeout(200);
-          // Type with realistic keystroke speed (50ms per char)
-          await page.keyboard.type(prompt, { delay: 50 });
+          await page.keyboard.type(promptText, { delay: 50 });
           await page.waitForTimeout(500);
-
-          // Press Enter to send
           await page.keyboard.press('Enter');
 
           let isPartial = false;
           let connectionDetected = false;
 
-          // ── Wait for response using stop-button detection ──
           let result = await waitForAgentResponse(page, RESPONSE_TIMEOUT);
 
-          // Check for connection request if response seems stalled
-          if (!result.complete && result.lastMsgText.length < 10) {
+          // Check for connection request if response seems stalled OR contains connection keywords
+          const connectionKeywordsInResponse = result.lastMsgText &&
+            /connect to continue|connect your|needs access|connection required|sign in to/i.test(result.lastMsgText);
+          if ((!result.complete && result.lastMsgText.length < 10) || connectionKeywordsInResponse) {
             const connCheck = await detectConnectionRequest(page);
             if (connCheck.detected) {
-              const connResult = await handleConnectionRequest(page, connCheck.platform, slideId, screenshotsDir);
+              const connResult = await handleConnectionRequest(page, connCheck.platform, slideId, screenshotsDir, headless);
               connectionEvents.push({ platform: connResult.platform, screenshotPath: connResult.ssPath });
               connectionDetected = true;
             }
           }
 
-          // If connection was detected, retry this prompt
+          // Connection approval resets the thread — re-navigate and retry
           if (connectionDetected) {
             console.log('    Retrying prompt after connection approval...');
             await page.goto(m365Url, { waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -1234,7 +1661,7 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedPrompts 
               await page.keyboard.press('Control+A');
               await page.keyboard.press('Backspace');
               await page.waitForTimeout(200);
-              await page.keyboard.type(prompt, { delay: 50 });
+              await page.keyboard.type(promptText, { delay: 50 });
               await page.waitForTimeout(500);
               await page.keyboard.press('Enter');
               result = await waitForAgentResponse(page, RESPONSE_TIMEOUT);
@@ -1246,30 +1673,206 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedPrompts 
 
           if (!result.complete) isPartial = true;
 
-          // Check for error response
-          const hasError = ERROR_PHRASES.some(phrase => (result.lastMsgText || '').toLowerCase().includes(phrase));
-          if (hasError) {
-            console.log(`    ⚠ Agent returned an error message — saved as needs-review`);
+          // ── Content-aware follow-through ──────────────────────────────────────
+          // For steps that should trigger a platform write (e.g. send email),
+          // ask AI to read the agent's response and decide: done, or needs more?
+          // Connection approval UIs are handled by clicking, not typing.
+          if (step.capture_platform_after && result.lastMsgText) {
+            const MAX_FOLLOW_UPS = 3;
+            let followUpCount = 0;
+            const contextHint = discovered.instructions || discovered.description || '';
+
+            while (followUpCount < MAX_FOLLOW_UPS) {
+              // Check for connection approval UI first — this must be clicked, not typed
+              const connCheck = await detectConnectionRequest(page);
+              if (connCheck.detected) {
+                console.log(`    ↪ Connection approval detected — handling in follow-through loop`);
+                const connResult = await handleConnectionRequest(page, connCheck.platform, slideId, screenshotsDir, headless);
+                connectionEvents.push({ platform: connResult.platform, screenshotPath: connResult.ssPath });
+                // After approval, re-navigate and re-send the original prompt
+                console.log('    Retrying prompt after connection approval...');
+                await page.goto(m365Url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+                await page.waitForLoadState('networkidle').catch(() => {});
+                await page.waitForTimeout(8000);
+                await dismissPopups(page);
+                await verifyAgentLoaded(page, discovered.name, m365Url);
+                try {
+                  const retryLocator = page.locator(INPUT_SEL).last();
+                  await retryLocator.waitFor({ state: 'visible', timeout: 15000 });
+                  await retryLocator.click();
+                  await page.waitForTimeout(300);
+                  await page.keyboard.press('Control+A');
+                  await page.keyboard.press('Backspace');
+                  await page.waitForTimeout(200);
+                  await page.keyboard.type(promptText, { delay: 50 });
+                  await page.waitForTimeout(500);
+                  await page.keyboard.press('Enter');
+                  result = await waitForAgentResponse(page, RESPONSE_TIMEOUT);
+                  if (!result.complete) isPartial = true;
+                } catch (retryErr) {
+                  console.log(`    ⚠ Retry after connection approval failed: ${retryErr.message?.substring(0, 50)}`);
+                }
+                continue; // Re-check from top of loop
+              }
+
+              const analysis = await analyzeAgentResponse(
+                result.lastMsgText,
+                step.slide_label || step.prompt,
+                step.capture_platform_after,
+                discovered.name,
+                contextHint,
+              );
+
+              if (analysis.complete) {
+                console.log(`    ✓ Action confirmed complete`);
+                break;
+              }
+
+              if (!analysis.followUp) {
+                // AI couldn't determine a follow-up — stop looping
+                break;
+              }
+
+              followUpCount++;
+              console.log(`    ↪ Agent needs more info (follow-up ${followUpCount}/${MAX_FOLLOW_UPS})`);
+              console.log(`      Sending: "${analysis.followUp.substring(0, 80)}${analysis.followUp.length > 80 ? '...' : ''}"`);
+
+              const fuLocator = page.locator(INPUT_SEL).last();
+              await fuLocator.waitFor({ state: 'visible', timeout: 15000 });
+              await fuLocator.click();
+              await page.waitForTimeout(300);
+              await page.keyboard.press('Control+A');
+              await page.keyboard.press('Backspace');
+              await page.waitForTimeout(200);
+              await page.keyboard.type(analysis.followUp, { delay: 50 });
+              await page.waitForTimeout(500);
+              await page.keyboard.press('Enter');
+
+              result = await waitForAgentResponse(page, RESPONSE_TIMEOUT);
+              if (!result.complete) isPartial = true;
+            }
+
+            if (followUpCount === MAX_FOLLOW_UPS) {
+              console.log(`    ⚠ Reached follow-up limit (${MAX_FOLLOW_UPS}) — proceeding anyway`);
+            }
+          }
+          // ─────────────────────────────────────────────────────────────────────
+
+          // Extract entity from this response if needed for the next step.
+          // If the current prompt itself contained [ENTITY] (AI generation mistake),
+          // retroactively resolve it in the stored promptText so callouts show the real value.
+          if (step.extract_entity && step.entity_context && result.lastMsgText) {
+            extractedEntity = await extractEntityFromResponse(result.lastMsgText, step.entity_context);
+            if (extractedEntity && promptText.includes('[ENTITY]')) {
+              promptText = promptText.replace(/\[ENTITY\]/g, extractedEntity);
+            }
           }
 
-          // Scroll and screenshot
+          const hasError = ERROR_PHRASES.some(phrase => (result.lastMsgText || '').toLowerCase().includes(phrase));
+          if (hasError) console.log(`    ⚠ Agent returned an error message — saved as needs-review`);
+
           const ssPath = path.join(screenshotsDir, `${slideId}-m365-prompt-${i + 1}.png`);
           await scrollAndScreenshot(page, ssPath);
           console.log(`    ✓ Screenshot saved`);
 
-          slides.push({
-            id: slideId++,
-            platform: 'm365-copilot',
-            type: 'agent',
-            screenshot: ssPath,
-            clip: null,
-            prompt,
-            callout: null,
-            partial: isPartial,
-            needsReview: hasError,
-          });
+          // ── Mid-conversation platform capture ──
+          // Opened in a new tab so the chat thread is never interrupted.
+          // If no URL is available, tag the conversation slide so the callout
+          // generator can mention the platform narratively instead.
+          let skippedPlatform = null;
+          if (step.capture_platform_after) {
+            const capPlatform = step.capture_platform_after;
+            const capConn = discovered.connections.find(c => c.platform === capPlatform && c.url);
+            if (capConn) {
+              const displayName = PLATFORM_DISPLAY[capPlatform] || capPlatform;
 
-          // Wait before next prompt
+              // When a recipient inbox is configured for Outlook, skip the coordinator's
+              // post-action slide (inbox view) — the recipient slide is more meaningful.
+              const skipCoordinatorSlide = capPlatform === 'outlook' && !!outlookRecipientUrl;
+
+              // Push conversation slide first
+              slides.push({
+                id: slideId++,
+                platform: 'm365-copilot',
+                type: 'agent',
+                screenshot: ssPath,
+                clip: null,
+                prompt: promptText,
+                callout: null,
+                storyLabel: step.slide_label || '',
+                partial: isPartial,
+                needsReview: hasError,
+              });
+
+              let captured = false;
+              if (!skipCoordinatorSlide) {
+                console.log(`\n  ● Slide ${slideId} — ${displayName} (post-action capture)`);
+                const platSsPath = path.join(screenshotsDir, `${slideId}-${capPlatform}-action.png`);
+                captured = await capturePlatformInNewTab(capConn, platSsPath);
+                slides.push({
+                  id: slideId++, platform: capPlatform, type: 'platform',
+                  placeholder: !captured, connectorName: capConn.name,
+                  screenshot: captured ? platSsPath : null,
+                  clip: null, prompt: null, callout: null,
+                  storyLabel: `Result in ${displayName}`, placeholderInfo: null,
+                });
+              }
+
+              // After Outlook step, capture the recipient inbox if configured
+              if (capPlatform === 'outlook' && outlookRecipientUrl) {
+                const recipientSsPath = await captureRecipientInbox(
+                  outlookRecipientUrl,
+                  outlookRecipientProfile,
+                  slideId,
+                  screenshotsDir,
+                  discovered,
+                );
+                if (recipientSsPath) {
+                  slides.push({
+                    id: slideId++,
+                    platform: 'outlook',
+                    type: 'platform',
+                    storyLabel: 'Volunteer receives notification',
+                    screenshot: recipientSsPath,
+                    clip: null,
+                    prompt: null,
+                    callout: null,
+                    placeholder: false,
+                  });
+                }
+              }
+            } else {
+              console.log(`    ⚠ capture_platform_after="${capPlatform}" — no URL, will mention in callout`);
+              skippedPlatform = capPlatform;
+              slides.push({
+                id: slideId++,
+                platform: 'm365-copilot',
+                type: 'agent',
+                screenshot: ssPath,
+                clip: null,
+                prompt: promptText,
+                callout: null,
+                storyLabel: step.slide_label || '',
+                partial: isPartial,
+                needsReview: hasError,
+                skippedPlatform,
+              });
+            }
+          } else {
+            slides.push({
+              id: slideId++,
+              platform: 'm365-copilot',
+              type: 'agent',
+              screenshot: ssPath,
+              clip: null,
+              prompt: promptText,
+              callout: null,
+              storyLabel: step.slide_label || '',
+              partial: isPartial,
+              needsReview: hasError,
+            });
+          }
+
           await page.waitForTimeout(2000);
         } catch (err) {
           process.stdout.write('\r' + ' '.repeat(60) + '\r');
@@ -1278,7 +1881,8 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedPrompts 
           await page.screenshot({ path: ssPath }).catch(() => {});
           slides.push({
             id: slideId++, platform: 'm365-copilot', type: 'agent',
-            screenshot: ssPath, clip: null, prompt, callout: null,
+            screenshot: ssPath, clip: null, prompt: promptText, callout: null,
+            storyLabel: step.slide_label || '',
           });
         }
       }
@@ -1359,9 +1963,15 @@ async function generateCallouts(slides, agentName, description) {
 
       const platformLabel = slide.platform === 'm365-copilot' ? 'M365 Copilot (agent chat)' : slide.platform;
 
+      // If this step triggered a platform action but the URL wasn't available,
+      // instruct the callout to mention that platform narratively.
+      const skippedNote = slide.skippedPlatform
+        ? `\nIMPORTANT: This step also triggers an action in ${PLATFORM_DISPLAY[slide.skippedPlatform] || slide.skippedPlatform} that is not shown in this demo (no URL was provided). End your callout with a brief narrative mention, e.g. "...and a ${PLATFORM_DISPLAY[slide.skippedPlatform] || slide.skippedPlatform} notification is automatically sent to the coordinator."`
+        : '';
+
       const response = await client.messages.create({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 300,
+        model: 'claude-sonnet-4-6',
+        max_tokens: 350,
         messages: [{
           role: 'user',
           content: [
@@ -1375,7 +1985,7 @@ async function generateCallouts(slides, agentName, description) {
 
 Agent description: ${description || 'An AI agent built with Microsoft Copilot Studio.'}
 Platform shown: ${platformLabel}
-${slide.prompt ? `User prompt: "${slide.prompt}"` : ''}
+${slide.prompt ? `User prompt: "${slide.prompt}"` : ''}${skippedNote}
 
 Write a single callout bubble text (2-3 sentences max) that:
 - Explains what the viewer is seeing in plain English
@@ -1396,9 +2006,17 @@ where x and y are percentages (0-100) indicating where the arrow should point.`,
       });
 
       const jsonStr = response.content[0]?.text || '';
-      // Parse JSON from response (handle markdown code blocks)
-      const cleaned = jsonStr.replace(/```json?\s*/g, '').replace(/```/g, '').trim();
-      const parsed = JSON.parse(cleaned);
+      // Parse JSON from response — strip markdown fences, then extract first {...} if needed
+      const stripped = jsonStr.replace(/```json?\s*/g, '').replace(/```/g, '').trim();
+      let parsed;
+      try {
+        parsed = JSON.parse(stripped);
+      } catch {
+        // Model may have included prose before/after the JSON object — extract it
+        const match = stripped.match(/\{[\s\S]*\}/);
+        if (!match) throw new Error(`No JSON object in response: ${stripped.substring(0, 80)}`);
+        parsed = JSON.parse(match[0]);
+      }
       slide.callout = {
         text: parsed.text || '',
         position: parsed.position || 'bottom-right',
@@ -1455,7 +2073,7 @@ async function generatePlaceholderInfo(slides, agentName, description) {
   for (const slide of placeholders) {
     try {
       const response = await client.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-6',
         max_tokens: 400,
         messages: [{
           role: 'user',
@@ -1887,12 +2505,14 @@ export async function runCreate(opts) {
     // STEP 2: Auto-discover from Copilot Studio
     discovered = await discoverFromStudio(activePage, studioUrl);
 
+    // Always apply explicitly-provided agent name/instructions (takes priority over auto-discovery)
+    if (opts.agentName) discovered.name = opts.agentName;
+    if (opts.instructions) discovered.instructions = opts.instructions;
+
     // If discovery returned nothing useful, use opts overrides or ask user for manual input
     // Close browser first so readline works on MINGW64
     if (discovered.name === 'My Agent' || (discovered.topics.length === 0 && discovered.connections.length === 0)) {
-      // Apply MCP-supplied overrides before potentially asking user
-      if (opts.agentName) discovered.name = opts.agentName;
-      if (opts.instructions) discovered.instructions = opts.instructions;
+      // MCP-supplied overrides already applied above
       if (opts.platforms) {
         const platList = opts.platforms.split(',').map(p => p.trim().toLowerCase()).filter(Boolean);
         for (const p of platList) {
@@ -1964,11 +2584,11 @@ export async function runCreate(opts) {
       }
     }
 
-    // STEP 2C: Generate demo prompts via AI (before capture)
-    const generatedPrompts = await generateDemoPrompts(discovered);
+    // STEP 2C: Generate demo script via AI (before capture)
+    const generatedScript = await generateDemoScript(discovered);
     // Update intro hook if AI provided one
-    if (generatedPrompts?.hook) {
-      discovered.hook = generatedPrompts.hook;
+    if (generatedScript?.hook) {
+      discovered.hook = generatedScript.hook;
     }
 
     // Set up demo directory
@@ -1978,7 +2598,10 @@ export async function runCreate(opts) {
     fs.mkdirSync(outputDir, { recursive: true });
 
     // STEP 3: Auto-capture from M365 Copilot
-    const captureResult = await autoCapture(activePage, m365Url, discovered, demoDir, generatedPrompts);
+    const captureResult = await autoCapture(activePage, m365Url, discovered, demoDir, generatedScript, headless, {
+      outlookRecipientUrl: opts.outlookRecipientUrl,
+      outlookRecipientProfile: opts.outlookRecipientProfile,
+    });
     slides = captureResult.slides;
     const connectionEvents = captureResult.connectionEvents || [];
 
@@ -2112,4 +2735,199 @@ export async function runCreate(opts) {
     await activePage.close().catch(() => {});
     await activeBrowser.close().catch(() => {});
   }
+}
+
+// ───────────────────────────────────────────
+// Plan: discover + script, no capture
+// ───────────────────────────────────────────
+
+const PLATFORM_PARAM_MAP = {
+  'sharepoint':     { param: 'sharepoint_url',     label: 'SharePoint',     reason: 'URL of the SharePoint list or site the agent queries' },
+  'power-automate': { param: 'power_automate_url', label: 'Power Automate', reason: 'URL of the Power Automate flow run history page' },
+  'teams':          { param: 'teams_url',           label: 'Teams',          reason: 'URL of the Teams channel where the agent posts messages' },
+  'outlook':        { param: 'outlook_url',         label: 'Outlook',        reason: 'URL of the Outlook inbox or folder the agent reads from or writes to' },
+  'xero':           { param: 'xero_url',            label: 'Xero',           reason: 'URL of the Xero page the agent accesses' },
+};
+
+export async function runPlan(opts = {}) {
+  const {
+    studioUrl, m365Url,
+    agentName: agentNameOverride, instructions: instructionsOverride, platforms,
+    sharepointUrl, powerAutomateUrl, teamsUrl, outlookUrl, xeroUrl,
+    headless = true,
+  } = opts;
+
+  console.log('  ● Planning demo (discovery only — no capture)...');
+
+  // Launch browser for Studio discovery
+  const { browser, context } = await createBrowserContext({ headless });
+  const valid = await isSessionValid(context);
+  if (!valid) {
+    await browser.close();
+    return { error: 'Session expired. Run: agentdemo auth' };
+  }
+
+  const page = await context.newPage();
+
+  let discovered = {
+    name: agentNameOverride || 'My Agent',
+    description: '',
+    instructions: instructionsOverride || '',
+    topics: [],
+    connections: [],
+  };
+
+  try {
+    try {
+      discovered = await discoverFromStudio(page, studioUrl);
+    } catch (err) {
+      console.log(`  ⚠ Studio discovery failed: ${err.message}`);
+    }
+
+    // Apply overrides
+    if (agentNameOverride) discovered.name = agentNameOverride;
+    if (instructionsOverride) discovered.instructions = instructionsOverride;
+
+    // Merge explicit platforms
+    if (platforms) {
+      for (const p of platforms.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)) {
+        if (!discovered.connections.some(c => c.platform === p)) {
+          discovered.connections.push({ name: p, platform: p });
+        }
+      }
+    }
+
+    // Attach any already-provided URLs so the script generator knows what's available
+    const PROVIDED_URLS = { sharepoint: sharepointUrl, 'power-automate': powerAutomateUrl, teams: teamsUrl, outlook: outlookUrl, xero: xeroUrl };
+    for (const [platform, url] of Object.entries(PROVIDED_URLS)) {
+      if (!url) continue;
+      const existing = discovered.connections.find(c => c.platform === platform);
+      if (existing) existing.url = url;
+      else discovered.connections.push({ name: platform, platform, url });
+    }
+
+  } finally {
+    await page.close().catch(() => {});
+    await browser.close().catch(() => {});
+  }
+
+  // Generate AI conversation script (no browser needed)
+  console.log('  ● Generating conversation script...');
+  const generatedScript = await generateDemoScript(discovered);
+
+  // ── Build planned slide list ──────────────────────────────────────────────
+  const plannedSlides = [];
+  let order = 1;
+
+  plannedSlides.push({ order: order++, type: 'welcome', label: 'Agent welcome screen', platform: 'm365-copilot', automated: true });
+
+  // Initial platform captures (before conversation)
+  for (const conn of discovered.connections) {
+    const meta = PLATFORM_PARAM_MAP[conn.platform] || { label: conn.platform };
+    plannedSlides.push({
+      order: order++,
+      type: 'platform-initial',
+      label: `${meta.label} — initial state`,
+      platform: conn.platform,
+      automated: !!conn.url,
+    });
+  }
+
+  // Conversation steps + any mid/post-action platform captures
+  const steps = generatedScript?.steps || [];
+  for (const step of steps) {
+    plannedSlides.push({
+      order: order++,
+      type: 'conversation',
+      label: step.slide_label || step.prompt.substring(0, 60),
+      platform: 'm365-copilot',
+      prompt: step.prompt,
+      extracts_entity: step.extract_entity || false,
+      automated: true,
+    });
+    if (step.capture_platform_after) {
+      const meta = PLATFORM_PARAM_MAP[step.capture_platform_after] || { label: step.capture_platform_after };
+      const conn = discovered.connections.find(c => c.platform === step.capture_platform_after);
+      plannedSlides.push({
+        order: order++,
+        type: 'platform-after-action',
+        label: `${meta.label} — after action`,
+        platform: step.capture_platform_after,
+        automated: !!(conn?.url),
+      });
+    }
+  }
+
+  // ── Identify missing inputs ───────────────────────────────────────────────
+  const PROVIDED = { sharepoint: !!sharepointUrl, 'power-automate': !!powerAutomateUrl, teams: !!teamsUrl, outlook: !!outlookUrl, xero: !!xeroUrl };
+  const missingInputs = [];
+
+  for (const conn of discovered.connections) {
+    const meta = PLATFORM_PARAM_MAP[conn.platform];
+    if (!meta || PROVIDED[conn.platform]) continue;
+
+    // A platform is "required" if it appears in a post-action capture (i.e. the demo
+    // depends on showing a change there) — otherwise it's nice-to-have.
+    const isPostAction = plannedSlides.some(s => s.platform === conn.platform && s.type === 'platform-after-action');
+    missingInputs.push({
+      param: meta.param,
+      label: meta.label,
+      reason: meta.reason,
+      required: isPostAction,
+      can_skip: true,
+    });
+  }
+
+  // Also catch platforms that appear in AI-generated script steps (capture_platform_after)
+  // but were NOT in discovered.connections — these won't be caught by the loop above.
+  for (const slide of plannedSlides) {
+    if (slide.type !== 'platform-after-action' && slide.type !== 'platform-initial') continue;
+    if (slide.automated) continue; // already has a URL
+    const meta = PLATFORM_PARAM_MAP[slide.platform];
+    if (!meta) continue;
+    const alreadyListed = missingInputs.some(m => m.param === meta.param);
+    if (!alreadyListed) {
+      missingInputs.push({
+        param: meta.param,
+        label: meta.label,
+        reason: `${meta.reason} — the demo script writes to or reads from this platform`,
+        required: slide.type === 'platform-after-action',
+        can_skip: true,
+      });
+    }
+  }
+
+  // Check for approval-loop pattern → suggest recipient inbox
+  const combinedText = `${discovered.instructions} ${steps.map(s => s.prompt).join(' ')}`.toLowerCase();
+  const hasApprovalLoop = combinedText.includes('confirm') && (combinedText.includes('email') || combinedText.includes('volunteer') || combinedText.includes('recipient'));
+  if (hasApprovalLoop && !outlookUrl) {
+    const alreadyListed = missingInputs.some(m => m.param === 'outlook_url');
+    missingInputs.push({
+      param: alreadyListed ? 'outlook_recipient_url' : 'outlook_url',
+      label: alreadyListed ? 'Recipient Outlook inbox' : 'Outlook',
+      reason: 'Agent sends emails awaiting a response — capturing the recipient\'s inbox completes the story',
+      required: false,
+      can_skip: true,
+      note: 'Requires a saved session for the recipient account. Run: agentdemo auth --profile recipient',
+    });
+  }
+
+  return {
+    agent: {
+      name: discovered.name,
+      description: discovered.description || null,
+      instructions_found: !!(discovered.instructions),
+      topics_found: discovered.topics.length,
+      connections_found: discovered.connections.map(c => c.platform),
+    },
+    script_generated: !!generatedScript,
+    hook: generatedScript?.hook || null,
+    planned_slides: plannedSlides,
+    slide_count: plannedSlides.length,
+    missing_inputs: missingInputs,
+    ready_to_capture: missingInputs.filter(m => m.required).length === 0,
+    note: missingInputs.length > 0
+      ? `${missingInputs.filter(m => m.required).length} required input(s) missing. ${missingInputs.filter(m => !m.required && m.can_skip).length} optional input(s) can be skipped.`
+      : 'All inputs present — ready to run create_demo.',
+  };
 }
