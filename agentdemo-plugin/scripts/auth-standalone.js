@@ -98,7 +98,70 @@ function waitForKeypress(message) {
   });
 }
 
+async function checkStatus() {
+  const email = process.env.DEMO_EMAIL || '(unknown)';
+
+  console.log('');
+  console.log('AgentDemo Auth Status');
+  console.log('─────────────────────');
+  console.log(`Account: ${email}`);
+  console.log(`Session dir: ${homeSessionDir}`);
+
+  if (!existsSync(STATE_FILE)) {
+    console.log('Status: NOT AUTHENTICATED');
+    console.log('');
+    console.log('No saved session found. Run: node scripts/auth-standalone.js');
+    process.exit(1);
+  }
+
+  console.log(`State file: ${STATE_FILE}`);
+  console.log('Checking session validity...');
+
+  const browser = await chromium.launch({
+    headless: true,
+    channel: 'chromium',
+  });
+  const context = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    viewport: { width: 1920, height: 1080 },
+    storageState: STATE_FILE,
+  });
+
+  const page = await context.newPage();
+  let isValid = false;
+  try {
+    await page.goto('https://www.office.com', {
+      waitUntil: 'domcontentloaded',
+      timeout: 60000,
+    });
+    await page.waitForTimeout(3000);
+    const url = page.url();
+    isValid = !url.includes('login.microsoftonline.com') && !url.includes('login.live.com');
+  } catch (err) {
+    console.log(`Validation error: ${err.message}`);
+  }
+
+  await browser.close();
+
+  if (isValid) {
+    console.log('Status: AUTHENTICATED');
+    console.log('');
+    console.log(`Session is valid for ${email}`);
+  } else {
+    console.log('Status: EXPIRED');
+    console.log('');
+    console.log('Session exists but has expired. Run: node scripts/auth-standalone.js');
+    process.exit(1);
+  }
+}
+
 async function main() {
+  // --status flag: check auth status without logging in
+  if (process.argv.includes('--status')) {
+    await checkStatus();
+    return;
+  }
+
   const email = process.env.DEMO_EMAIL;
   const password = process.env.DEMO_PASSWORD;
 
