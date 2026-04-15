@@ -7,11 +7,11 @@ Self-contained plugin that creates Storylane-style interactive demos for Microso
 1. Upload `agentdemo-plugin.zip` to Claude Code:
    Customize > Personal plugins > Upload plugin
 
-2. Run setup to configure credentials:
+2. Run setup to install dependencies and configure credentials:
    ```
    node scripts/setup.js
    ```
-   This creates `~/.agentdemo/.env` with your M365 demo account details.
+   This installs npm dependencies (if missing) and creates `~/.agentdemo/.env` with your M365 demo account details.
 
    OR manually create `~/.agentdemo/.env`:
    ```

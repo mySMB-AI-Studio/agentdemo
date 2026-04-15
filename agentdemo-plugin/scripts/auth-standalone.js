@@ -6,7 +6,35 @@
  * Run: node scripts/auth-standalone.js
  */
 
-import { config } from 'dotenv';
+// Pre-flight: ensure npm dependencies are installed before importing them.
+// This keeps auth-standalone runnable even if users skipped `npm install`.
+import { resolve as _resolve, dirname as _dirname, join as _join } from 'path';
+import { fileURLToPath as _fileURLToPath } from 'url';
+import { existsSync as _existsSync } from 'fs';
+import { execSync as _execSync } from 'child_process';
+
+const __preflightDir = _dirname(_fileURLToPath(import.meta.url));
+const __preflightRoot = _resolve(__preflightDir, '..');
+const __preflightNm = _join(__preflightRoot, 'node_modules');
+
+if (!_existsSync(__preflightNm)) {
+  console.log('');
+  console.log('Installing dependencies (first-time setup)...');
+  console.log('This will take 1–2 minutes.');
+  console.log('');
+  try {
+    _execSync('npm install', { cwd: __preflightRoot, stdio: 'inherit' });
+    console.log('');
+  } catch (err) {
+    console.error('');
+    console.error('npm install failed. Please run manually:');
+    console.error(`  cd "${__preflightRoot}"`);
+    console.error('  npm install');
+    process.exit(1);
+  }
+}
+
+const { config } = await import('dotenv');
 import { resolve, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync, mkdirSync } from 'fs';
@@ -53,7 +81,7 @@ if (!existsSync(homeSessionDir)) {
 process.env.AGENTDEMO_SESSION_DIR = homeSessionDir;
 
 // Import and run auth
-import { chromium } from 'playwright';
+const { chromium } = await import('playwright');
 import fs from 'fs';
 import path from 'path';
 import readline from 'readline';

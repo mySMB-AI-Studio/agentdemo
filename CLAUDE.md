@@ -5,10 +5,11 @@
 1. Upload `agentdemo-plugin.zip` to Claude Code:
    Customize > Personal plugins > Upload plugin
 
-2. Run setup to configure credentials:
+2. Run setup to install dependencies and configure credentials:
    ```
    node scripts/setup.js
    ```
+   (Auto-runs `npm install` on first use.)
    OR manually create `~/.agentdemo/.env`:
    ```
    DEMO_EMAIL=your-demo-account@company.com

@@ -12,8 +12,45 @@ import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join } from 'path';
+import { execSync } from 'child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const PLUGIN_ROOT = resolve(__dirname, '..');
+
+function ensureDependencies() {
+  const nodeModulesPath = join(PLUGIN_ROOT, 'node_modules');
+  const packageJsonPath = join(PLUGIN_ROOT, 'package.json');
+
+  if (!fs.existsSync(packageJsonPath)) {
+    console.error('package.json not found at', PLUGIN_ROOT);
+    console.error('Are you running this from the plugin directory?');
+    process.exit(1);
+  }
+
+  if (fs.existsSync(nodeModulesPath)) {
+    return; // deps already installed
+  }
+
+  console.log('');
+  console.log('Installing dependencies (first-time setup)...');
+  console.log('This will take 1–2 minutes.');
+  console.log('');
+
+  try {
+    execSync('npm install', {
+      cwd: PLUGIN_ROOT,
+      stdio: 'inherit',
+    });
+    console.log('');
+    console.log('Dependencies installed.');
+  } catch (err) {
+    console.error('');
+    console.error('npm install failed. Please run manually:');
+    console.error(`  cd "${PLUGIN_ROOT}"`);
+    console.error('  npm install');
+    process.exit(1);
+  }
+}
 
 // Check all known .env locations
 const envLocations = [
@@ -33,6 +70,10 @@ async function main() {
   console.log('');
   console.log('AgentDemo Setup');
   console.log('───────────────');
+
+  // Step 1: Install npm dependencies if missing
+  ensureDependencies();
+
   console.log('');
 
   // Check if .env already exists somewhere
