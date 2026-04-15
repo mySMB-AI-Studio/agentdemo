@@ -3,17 +3,39 @@
  * Exposes AgentDemo functionality as MCP tools for use in Claude Code.
  */
 
+import { config } from 'dotenv';
+import { resolve, dirname, join } from 'path';
+import { fileURLToPath } from 'url';
+import { existsSync } from 'fs';
+import os from 'os';
+
+const __mcpDir = dirname(fileURLToPath(import.meta.url));
+
+// Look for .env in multiple locations (first match wins)
+const envLocations = [
+  resolve(__mcpDir, '.env'),
+  resolve(__mcpDir, '../.env'),
+  join(os.homedir(), '.agentdemo', '.env'),
+  resolve(process.cwd(), '.env'),
+];
+
+let envLoaded = false;
+for (const envPath of envLocations) {
+  if (existsSync(envPath)) {
+    config({ path: envPath });
+    console.error('Loaded .env from:', envPath);
+    envLoaded = true;
+    break;
+  }
+}
+if (!envLoaded) {
+  console.error('No .env file found. Searched:', envLocations.join(', '));
+  console.error('Run: node scripts/setup.js  OR  create ~/.agentdemo/.env');
+}
+
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
-const dotenv = require('dotenv');
 const path = require('path');
-
-// Load .env from agentdemo root folder
-dotenv.config({
-  path: path.resolve(path.dirname(
-    new URL(import.meta.url).pathname
-  ), '../.env')
-});
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';

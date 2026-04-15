@@ -8,7 +8,20 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.join(__dirname, '..');
 
-const SESSION_DIR = path.join(ROOT, '.browser-session');
+// Look for browser session in multiple locations
+import os from 'os';
+const HOME_SESSION_DIR = path.join(os.homedir(), '.agentdemo', '.browser-session');
+const LOCAL_SESSION_DIR = path.join(ROOT, '.browser-session');
+
+// Priority: env override > home dir (if exists) > local
+function resolveSessionDir() {
+  if (process.env.AGENTDEMO_SESSION_DIR) return process.env.AGENTDEMO_SESSION_DIR;
+  if (fs.existsSync(path.join(HOME_SESSION_DIR, 'state.json'))) return HOME_SESSION_DIR;
+  if (fs.existsSync(path.join(LOCAL_SESSION_DIR, 'state.json'))) return LOCAL_SESSION_DIR;
+  return HOME_SESSION_DIR; // default to home for new sessions
+}
+
+const SESSION_DIR = resolveSessionDir();
 const STATE_FILE = path.join(SESSION_DIR, 'state.json');
 
 function ensureSessionDir() {

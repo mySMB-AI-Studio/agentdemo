@@ -1,19 +1,31 @@
 # AgentDemo Plugin for Claude Code
 
-Self-contained Mission Control plugin that creates Storylane-style interactive demos for Microsoft Copilot Studio agents.
+Self-contained plugin that creates Storylane-style interactive demos for Microsoft Copilot Studio agents.
 
 ## Installation
 
-1. Install the plugin zip (`agentdemo-plugin.zip`) through Mission Control.
-2. Run `npm install` in the plugin directory to install dependencies.
-3. Copy `.env.example` to `.env` and fill in your credentials:
+1. Upload `agentdemo-plugin.zip` to Claude Code:
+   Customize > Personal plugins > Upload plugin
 
-```
-DEMO_EMAIL=demo@yourtenant.onmicrosoft.com
-DEMO_PASSWORD=your-password
-DEMO_TENANT=yourtenant
-ANTHROPIC_API_KEY=sk-ant-...    # optional, for AI callout text
-```
+2. Run setup to configure credentials:
+   ```
+   node scripts/setup.js
+   ```
+   This creates `~/.agentdemo/.env` with your M365 demo account details.
+
+   OR manually create `~/.agentdemo/.env`:
+   ```
+   DEMO_EMAIL=your-demo-account@company.com
+   DEMO_PASSWORD=your-password
+   DEMO_TENANT=your-tenant
+   ANTHROPIC_API_KEY=your-key
+   ```
+
+3. Authenticate with M365:
+   ```
+   node scripts/auth-standalone.js
+   ```
+   This opens a browser to log in (supports MFA) and saves the session.
 
 4. Restart Claude Code. The `agentdemo` MCP tools will be available.
 
@@ -33,3 +45,13 @@ ANTHROPIC_API_KEY=sk-ant-...    # optional, for AI callout text
 2. Opens M365 Copilot and captures the agent responding to real prompts
 3. Generates AI-written callout text for each slide (requires `ANTHROPIC_API_KEY`)
 4. Builds a self-contained `demo.html` with browser-frame screenshots and navigation
+
+## Where credentials are stored
+
+The plugin looks for `.env` in this order:
+1. `scripts/.env` (plugin directory)
+2. Plugin root `.env`
+3. `~/.agentdemo/.env` (recommended)
+4. Current working directory `.env`
+
+Browser sessions are saved to `~/.agentdemo/.browser-session/`.
