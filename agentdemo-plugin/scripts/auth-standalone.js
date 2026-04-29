@@ -68,16 +68,25 @@ for (const envPath of envLocations) {
 }
 
 if (!envLoaded) {
-  const hint = profile
-    ? `Create ~/.agentdemo/.env-${profile} with DEMO_EMAIL and DEMO_PASSWORD, or run setup first: node scripts/setup.js`
-    : 'Run setup first: node scripts/setup.js';
-  console.error(`No .env file found. ${hint}`);
+  console.error('No .env file found. Run setup first: node scripts/setup.js');
   process.exit(1);
 }
 
-if (!process.env.DEMO_EMAIL || !process.env.DEMO_PASSWORD) {
-  const envFile = profile ? `~/.agentdemo/.env-${profile}` : '~/.agentdemo/.env';
-  console.error(`DEMO_EMAIL and DEMO_PASSWORD must be set in ${envFile}`);
+// Resolve credentials — named profiles use PROFILE_{NAME}_EMAIL / PROFILE_{NAME}_PASSWORD
+// falling back to DEMO_EMAIL / DEMO_PASSWORD if the profile-specific vars are absent.
+let resolvedEmail = process.env.DEMO_EMAIL;
+let resolvedPassword = process.env.DEMO_PASSWORD;
+if (profile && profile !== 'default') {
+  const envPrefix = `PROFILE_${profile.toUpperCase()}`;
+  if (process.env[`${envPrefix}_EMAIL`])    resolvedEmail    = process.env[`${envPrefix}_EMAIL`];
+  if (process.env[`${envPrefix}_PASSWORD`]) resolvedPassword = process.env[`${envPrefix}_PASSWORD`];
+}
+
+if (!resolvedEmail || !resolvedPassword) {
+  const varHint = profile && profile !== 'default'
+    ? `PROFILE_${profile.toUpperCase()}_EMAIL / PROFILE_${profile.toUpperCase()}_PASSWORD (or DEMO_EMAIL / DEMO_PASSWORD as fallback)`
+    : 'DEMO_EMAIL and DEMO_PASSWORD';
+  console.error(`Credentials not found. Set ${varHint} in ~/.agentdemo/.env`);
   process.exit(1);
 }
 
@@ -112,7 +121,7 @@ function waitForKeypress(message) {
 }
 
 async function checkStatus() {
-  const email = process.env.DEMO_EMAIL || '(unknown)';
+  const email = resolvedEmail || '(unknown)';
 
   console.log('');
   console.log('AgentDemo Auth Status');
@@ -178,8 +187,8 @@ async function main() {
     return;
   }
 
-  const email = process.env.DEMO_EMAIL;
-  const password = process.env.DEMO_PASSWORD;
+  const email = resolvedEmail;
+  const password = resolvedPassword;
 
   console.log('');
   if (profile) console.log(`Profile:       ${profile}`);
