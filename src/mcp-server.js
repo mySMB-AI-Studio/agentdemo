@@ -13,7 +13,7 @@ const path = require('path');
 // Use fileURLToPath so that URL-encoded spaces (%20) in the path are decoded
 // correctly on Windows — new URL(import.meta.url).pathname leaves them encoded.
 const __mcpDir = path.dirname(_fileURLToPath(import.meta.url));
-dotenv.config({ path: path.resolve(__mcpDir, '../.env') });
+dotenv.config({ path: path.resolve(__mcpDir, '../.env'), override: true });
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -23,7 +23,10 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { runCreate, runPlan } from './create.js';
+import { spawn } from 'child_process';
+import os from 'os';
+import crypto from 'crypto';
+import { runPlan } from './create.js';
 import { runGenerate } from './generate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -38,7 +41,7 @@ const TOOLS = [
       'Plan a demo without capturing anything. Runs Copilot Studio discovery and AI script generation, ' +
       'then returns the planned slide list, the conversation script, and a list of any missing inputs ' +
       '(platform URLs, auth sessions) needed before create_demo can run. ' +
-      'Use this BEFORE create_demo to validate the approach and identify what to collect from the user.',
+      'Use this BEFORE queue_demo to validate the approach and identify what to collect from the user.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -66,9 +69,10 @@ const TOOLS = [
     },
   },
   {
-    name: 'create_demo',
+    name: 'queue_demo',
     description:
-      'Create a new interactive demo by automating Copilot Studio discovery and M365 Copilot capture. ' +
+      'Queue a new interactive demo for background capture. Returns immediately with a job_id. ' +
+      'The capture runs in a detached background process — use get_demo_status with the job_id to check progress. ' +
       'Provide the Copilot Studio URL and the M365 Copilot URL. ' +
       'Optionally supply a slug (folder name) and whether to run headless.',
     inputSchema: {
@@ -90,13 +94,17 @@ const TOOLS = [
           type: 'string',
           description: 'Agent instructions to use if Copilot Studio discovery fails',
         },
+        prompts: {
+          type: 'string',
+          description: 'Pipe-separated (|) list of exact prompts to send in sequence, bypassing AI script generation. Each prompt becomes its own slide.',
+        },
         platforms: {
           type: 'string',
           description: 'Comma-separated list of platforms the agent connects to (e.g. "sharepoint,power-automate")',
         },
         sharepoint_url: {
           type: 'string',
-          description: 'URL of the SharePoint list or site to capture',
+          description: 'Comma-separated SharePoint URL(s) to capture (supports multiple)',
         },
         power_automate_url: {
           type: 'string',
@@ -142,7 +150,8 @@ const TOOLS = [
   {
     name: 'get_demo_status',
     description:
-      'Get the current status of a demo — whether it has screenshots, a generated HTML file, and when it was last updated.',
+      'Get the current status of a demo. Accepts either a slug (demo folder name) or a job_id (from queue_demo). ' +
+      'When using job_id, returns background job progress including state, slides_captured, and phase.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -150,8 +159,11 @@ const TOOLS = [
           type: 'string',
           description: 'Demo folder name (as shown by list_demos)',
         },
+        job_id: {
+          type: 'string',
+          description: 'Job ID returned by queue_demo — reads progress from the background job status file',
+        },
       },
-      required: ['slug'],
     },
   },
   {
@@ -236,9 +248,9 @@ async function handlePlanDemo(args) {
   }
 }
 
-async function handleCreateDemo(args) {
+async function handleQueueDemo(args) {
   const {
-    studio_url, m365_url, agent_name, instructions, platforms,
+    studio_url, m365_url, agent_name, instructions, prompts, platforms,
     sharepoint_url, power_automate_url, teams_url, outlook_url, xero_url, custom_urls,
     outlook_recipient_url, outlook_recipient_profile,
     slug, headless = false,
@@ -248,61 +260,103 @@ async function handleCreateDemo(args) {
     return { error: 'studio_url and m365_url are required' };
   }
 
-  // Convert custom_urls CSV string into array for runCreate
+  // Generate unique job ID
+  const jobId = crypto.randomBytes(8).toString('hex');
+  const jobDir = path.join(os.homedir(), '.agentdemo', 'jobs', jobId);
+  fs.mkdirSync(jobDir, { recursive: true });
+
+  // Convert pipe-separated prompts string into array
+  const promptsArr = prompts ? prompts.split('|').map(p => p.trim()).filter(Boolean) : undefined;
+
+  // Convert CSV strings into arrays for runCreate
   const customUrlArr = custom_urls ? custom_urls.split(',').map(u => u.trim()).filter(Boolean) : undefined;
+  const spUrlArr = sharepoint_url ? sharepoint_url.split(',').map(u => u.trim()).filter(Boolean) : undefined;
 
-  try {
-    await runCreate({
-      studioUrl: studio_url,
-      m365Url: m365_url,
-      agentName: agent_name || undefined,
-      instructions: instructions || undefined,
-      platforms: platforms || undefined,
-      sharepointUrl: sharepoint_url || undefined,
-      powerAutomateUrl: power_automate_url || undefined,
-      teamsUrl: teams_url || undefined,
-      outlookUrl: outlook_url || undefined,
-      xeroUrl: xero_url || undefined,
-      customUrl: customUrlArr,
-      outlookRecipientUrl: outlook_recipient_url || undefined,
-      outlookRecipientProfile: outlook_recipient_profile || undefined,
-      slug: slug || undefined,
-      headless,
-      mcpMode: true,
-    });
+  // Build opts for the background runner
+  const opts = {
+    _jobId: jobId,
+    studioUrl: studio_url,
+    m365Url: m365_url,
+    agentName: agent_name || undefined,
+    instructions: instructions || undefined,
+    prompts: promptsArr,
+    platforms: platforms || undefined,
+    sharepointUrl: spUrlArr,
+    powerAutomateUrl: power_automate_url || undefined,
+    teamsUrl: teams_url || undefined,
+    outlookUrl: outlook_url || undefined,
+    xeroUrl: xero_url || undefined,
+    customUrl: customUrlArr,
+    outlookRecipientUrl: outlook_recipient_url || undefined,
+    outlookRecipientProfile: outlook_recipient_profile || undefined,
+    slug: slug || undefined,
+    headless,
+    mcpMode: true,
+  };
 
-    // Derive the expected slug the same way create.js does, then find that demo.
-    // Fallback order: explicit slug arg → slugify(agent_name) → most-recently-modified demo.
-    let expectedSlug = slug;
-    if (!expectedSlug && agent_name) {
-      expectedSlug = agent_name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    }
-    const demos = getDemoList();
-    const created = expectedSlug
-      ? demos.find(d => d.slug === expectedSlug)
-      : demos.sort((a, b) => (b.last_updated || '').localeCompare(a.last_updated || ''))[0];
+  // Write opts and initial status
+  const optsFile = path.join(jobDir, 'opts.json');
+  fs.writeFileSync(optsFile, JSON.stringify(opts, null, 2));
+  fs.writeFileSync(path.join(jobDir, 'status.json'), JSON.stringify({
+    job_id: jobId,
+    state: 'queued',
+    agent_name: agent_name || null,
+    slug: slug || null,
+    queued_at: new Date().toISOString(),
+    slides_captured: 0,
+    phase: null,
+    output_path: null,
+    error: null,
+  }, null, 2));
 
-    return {
-      success: true,
-      message: `Demo created successfully.`,
-      demo: created || null,
-    };
-  } catch (err) {
-    return {
-      success: false,
-      error: err.message,
-    };
-  }
+  // Spawn detached background process
+  const child = spawn(process.execPath, [path.join(__dirname, 'job-runner.js'), optsFile], {
+    detached: true,
+    stdio: 'ignore',
+    env: { ...process.env },
+  });
+  child.unref();
+
+  return {
+    success: true,
+    job_id: jobId,
+    state: 'queued',
+    message: `Demo capture started in background. Use get_demo_status with job_id "${jobId}" to check progress.`,
+  };
 }
 
 async function handleGetDemoStatus(args) {
-  const { slug } = args;
-  const demoDir = path.join(DEMOS_DIR, slug);
+  const { slug, job_id } = args;
 
+  // Job ID path — read from background job status file
+  if (job_id) {
+    const statusFile = path.join(os.homedir(), '.agentdemo', 'jobs', job_id, 'status.json');
+    if (!fs.existsSync(statusFile)) {
+      return { error: `Job "${job_id}" not found.` };
+    }
+    try {
+      const status = JSON.parse(fs.readFileSync(statusFile, 'utf8'));
+      // If complete and we have a slug, merge in demo info
+      if (status.state === 'complete' && status.slug) {
+        const demoDir = path.join(DEMOS_DIR, status.slug);
+        if (fs.existsSync(demoDir)) {
+          status.demo = getDemoStatus(status.slug, demoDir);
+        }
+      }
+      return status;
+    } catch (err) {
+      return { error: `Failed to read job status: ${err.message}` };
+    }
+  }
+
+  // Slug path — existing behavior
+  if (!slug) {
+    return { error: 'Provide either slug or job_id.' };
+  }
+  const demoDir = path.join(DEMOS_DIR, slug);
   if (!fs.existsSync(demoDir)) {
     return { error: `Demo "${slug}" not found. Run list_demos to see available demos.` };
   }
-
   return getDemoStatus(slug, demoDir);
 }
 
@@ -343,12 +397,12 @@ async function handleResumeDemo(args) {
 
 async function handleListDemos() {
   if (!fs.existsSync(DEMOS_DIR)) {
-    return { demos: [], message: 'No demos directory found. Run create_demo to get started.' };
+    return { demos: [], message: 'No demos directory found. Run queue_demo to get started.' };
   }
 
   const demos = getDemoList();
   if (demos.length === 0) {
-    return { demos: [], message: 'No demos found. Run create_demo to get started.' };
+    return { demos: [], message: 'No demos found. Run queue_demo to get started.' };
   }
 
   return { demos };
@@ -465,7 +519,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   let result;
   switch (name) {
     case 'plan_demo':         result = await handlePlanDemo(args); break;
-    case 'create_demo':       result = await handleCreateDemo(args); break;
+    case 'queue_demo':        result = await handleQueueDemo(args); break;
     case 'get_demo_status':   result = await handleGetDemoStatus(args); break;
     case 'resume_demo':       result = await handleResumeDemo(args); break;
     case 'list_demos':        result = await handleListDemos(); break;

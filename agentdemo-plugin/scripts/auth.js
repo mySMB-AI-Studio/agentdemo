@@ -13,12 +13,19 @@ import os from 'os';
 const HOME_SESSION_DIR = path.join(os.homedir(), '.agentdemo', '.browser-session');
 const LOCAL_SESSION_DIR = path.join(ROOT, '.browser-session');
 
-// Priority: env override > home dir (if exists) > local
-function resolveSessionDir() {
-  if (process.env.AGENTDEMO_SESSION_DIR) return process.env.AGENTDEMO_SESSION_DIR;
+/**
+ * Resolve the session directory for a given profile.
+ * Default profile → ~/.agentdemo/.browser-session/
+ * Named profile   → ~/.agentdemo/.browser-session-{profile}/
+ */
+export function resolveSessionDir(profile) {
+  if (process.env.AGENTDEMO_SESSION_DIR && !profile) return process.env.AGENTDEMO_SESSION_DIR;
+  if (profile && profile !== 'default') {
+    return path.join(os.homedir(), '.agentdemo', `.browser-session-${profile}`);
+  }
   if (fs.existsSync(path.join(HOME_SESSION_DIR, 'state.json'))) return HOME_SESSION_DIR;
   if (fs.existsSync(path.join(LOCAL_SESSION_DIR, 'state.json'))) return LOCAL_SESSION_DIR;
-  return HOME_SESSION_DIR; // default to home for new sessions
+  return HOME_SESSION_DIR;
 }
 
 const SESSION_DIR = resolveSessionDir();
@@ -41,7 +48,11 @@ function waitForKeypress(message) {
 }
 
 export async function createBrowserContext(options = {}) {
-  ensureSessionDir();
+  // Support named profiles — each gets its own session directory
+  const profileDir = options.profile ? resolveSessionDir(options.profile) : SESSION_DIR;
+  const profileStateFile = path.join(profileDir, 'state.json');
+  if (!fs.existsSync(profileDir)) fs.mkdirSync(profileDir, { recursive: true });
+
   const isHeadless = options.headless ?? false;
   const launchOpts = {
     headless: isHeadless,
@@ -56,18 +67,23 @@ export async function createBrowserContext(options = {}) {
     viewport: isHeadless ? { width: 1920, height: 1080 } : null,
   };
 
-  if (fs.existsSync(STATE_FILE)) {
-    contextOpts.storageState = STATE_FILE;
+  if (fs.existsSync(profileStateFile)) {
+    contextOpts.storageState = profileStateFile;
   }
 
   const browser = await chromium.launch(launchOpts);
   const context = await browser.newContext(contextOpts);
+  // Attach the profile state file path so saveSession knows where to write
+  context._agentdemoStateFile = profileStateFile;
   return { browser, context };
 }
 
 export async function saveSession(context) {
-  ensureSessionDir();
-  await context.storageState({ path: STATE_FILE });
+  // Use the profile-specific state file if set, otherwise default
+  const stateFile = context._agentdemoStateFile || STATE_FILE;
+  const dir = path.dirname(stateFile);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  await context.storageState({ path: stateFile });
 }
 
 export async function isSessionValid(context) {

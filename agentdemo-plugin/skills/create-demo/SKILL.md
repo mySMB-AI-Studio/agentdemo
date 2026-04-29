@@ -1,6 +1,6 @@
 ---
 name: create-demo
-description: Creates a complete interactive demo for a Copilot Studio agent published to M365 Copilot. Captures real screenshots of the agent responding and supporting platforms (SharePoint, Power Automate, Teams, Outlook, Xero) and generates a shareable demo.html file. Use when asked to create, record, or generate a demo for an agent.
+description: Queues a background capture for a Copilot Studio agent demo. Returns immediately with a job_id — the capture runs in a detached process. Use when asked to create, record, or generate a demo for an agent.
 argument-hint: [studio-url] [m365-url]
 allowed-tools: [Bash, Read, Glob]
 ---
@@ -20,28 +20,37 @@ Use this skill when the user wants to create a demo for a Copilot Studio agent.
   - Xero URL
   - Any custom platform URLs
 - Agent name (optional — can be auto-detected)
-- Agent description (optional)
-- Agent instructions (optional — improves prompt quality)
+- Agent instructions (optional — greatly improves prompt quality; always pass user-provided prompts/workflow via this field)
 
 ## How to handle platform URLs
-If the user provides platform URLs in their message, extract them and pass to create_demo as the appropriate URL parameters.
+If the user provides platform URLs in their message, extract them and pass to queue_demo as the appropriate URL parameters.
 
 If the user does not provide platform URLs but mentions platforms, still pass the platforms list — placeholder slides will be created for those without URLs.
 
 ## Steps
 1. Ask for the two required URLs if not provided
-2. Call the agentdemo MCP tool: create_demo
+2. Call the agentdemo MCP tool: **queue_demo**
 3. Pass studio_url, m365_url, and any platform URLs provided
-4. Report the result to the user including the demo path
-5. If the demo has placeholder slides, show the placeholder guide instructions to the user
+4. It returns immediately with a **job_id** and state "queued"
+5. Tell the user:
+   - "Demo capture has started for [agent name]."
+   - "Job ID: [job_id]"
+   - "You can check progress anytime by asking me for the demo status."
+   - If Teams webhook is configured: "You'll get a Teams notification when it's ready."
+6. **Do NOT wait for the demo to complete. Do NOT call get_demo_status immediately after. Just confirm the job was queued and move on.**
+
+## Checking status later
+When the user asks for demo status, call **get_demo_status** with the `job_id`.
+Status states: `queued` → `running` → `complete` | `failed`
+The `phase` field shows progress: `discovery_complete` → `script_generated` → `capturing` → `capture_complete` → `callouts_generated` → `html_generated`
 
 ## Example
 User: "Create a demo for the Performance Review Agent. Studio URL: https://copilotstudio... M365 URL: https://m365.cloud.microsoft/... The SharePoint list is at https://tenant.sharepoint.com/... Power Automate flows are at https://make.powerautomate.com/..."
 
-Call create_demo with:
+Call queue_demo with:
   studio_url, m365_url,
   platforms: "sharepoint,power-automate",
   sharepoint_url: "https://tenant.sharepoint.com/...",
   power_automate_url: "https://make.powerautomate.com/..."
 
-Result: "Demo created at [path]. 2 platform slides + 3 M365 Copilot slides captured. 1 placeholder needs a manual screenshot."
+Result: "Demo capture has started for Performance Review Agent. Job ID: a1b2c3d4. You can check progress anytime."

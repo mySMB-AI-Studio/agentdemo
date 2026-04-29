@@ -42,10 +42,16 @@ import os from 'os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// Load .env from multiple locations (first match wins)
+// Parse --profile flag (e.g. --profile recipient)
+const profileArgIndex = process.argv.indexOf('--profile');
+const profile = profileArgIndex !== -1 ? process.argv[profileArgIndex + 1] : null;
+
+// Load .env — profile-specific first, then fallback locations
+// Profile .env: ~/.agentdemo/.env-{profile}  (e.g. ~/.agentdemo/.env-recipient)
 const envLocations = [
   resolve(__dirname, '.env'),
   resolve(__dirname, '../.env'),
+  ...(profile ? [join(os.homedir(), '.agentdemo', `.env-${profile}`)] : []),
   join(os.homedir(), '.agentdemo', '.env'),
   resolve(process.cwd(), '.env'),
 ];
@@ -54,30 +60,37 @@ let envLoaded = false;
 for (const envPath of envLocations) {
   if (existsSync(envPath)) {
     config({ path: envPath });
-    console.log('Loaded .env from:', envPath);
+    const label = profile ? ` (profile: ${profile})` : '';
+    console.log(`Loaded .env from: ${envPath}${label}`);
     envLoaded = true;
     break;
   }
 }
 
 if (!envLoaded) {
-  console.error('No .env file found. Run setup first: node scripts/setup.js');
+  const hint = profile
+    ? `Create ~/.agentdemo/.env-${profile} with DEMO_EMAIL and DEMO_PASSWORD, or run setup first: node scripts/setup.js`
+    : 'Run setup first: node scripts/setup.js';
+  console.error(`No .env file found. ${hint}`);
   process.exit(1);
 }
 
 if (!process.env.DEMO_EMAIL || !process.env.DEMO_PASSWORD) {
-  console.error('DEMO_EMAIL and DEMO_PASSWORD must be set in .env');
+  const envFile = profile ? `~/.agentdemo/.env-${profile}` : '~/.agentdemo/.env';
+  console.error(`DEMO_EMAIL and DEMO_PASSWORD must be set in ${envFile}`);
   process.exit(1);
 }
 
-// Ensure ~/.agentdemo/.browser-session/ exists
-const homeSessionDir = join(os.homedir(), '.agentdemo', '.browser-session');
+// Resolve session directory — named profiles get their own folder
+const homeSessionDir = (profile && profile !== 'default')
+  ? join(os.homedir(), '.agentdemo', `.browser-session-${profile}`)
+  : join(os.homedir(), '.agentdemo', '.browser-session');
+
 if (!existsSync(homeSessionDir)) {
   mkdirSync(homeSessionDir, { recursive: true });
 }
 
-// Patch the session dir to use ~/.agentdemo/.browser-session/ before importing auth
-// We do this by setting an env var that auth.js can check
+// Set session dir env var (auth.js reads this for the default profile)
 process.env.AGENTDEMO_SESSION_DIR = homeSessionDir;
 
 // Import and run auth
@@ -104,13 +117,15 @@ async function checkStatus() {
   console.log('');
   console.log('AgentDemo Auth Status');
   console.log('─────────────────────');
-  console.log(`Account: ${email}`);
-  console.log(`Session dir: ${homeSessionDir}`);
+  if (profile) console.log(`Profile:  ${profile}`);
+  console.log(`Account:  ${email}`);
+  console.log(`Session:  ${homeSessionDir}`);
 
   if (!existsSync(STATE_FILE)) {
     console.log('Status: NOT AUTHENTICATED');
     console.log('');
-    console.log('No saved session found. Run: node scripts/auth-standalone.js');
+    const runCmd = profile ? `node scripts/auth-standalone.js --profile ${profile}` : 'node scripts/auth-standalone.js';
+    console.log(`No saved session found. Run: ${runCmd}`);
     process.exit(1);
   }
 
@@ -150,7 +165,8 @@ async function checkStatus() {
   } else {
     console.log('Status: EXPIRED');
     console.log('');
-    console.log('Session exists but has expired. Run: node scripts/auth-standalone.js');
+    const rerunCmd = profile ? `node scripts/auth-standalone.js --profile ${profile}` : 'node scripts/auth-standalone.js';
+    console.log(`Session exists but has expired. Run: ${rerunCmd}`);
     process.exit(1);
   }
 }
@@ -166,7 +182,9 @@ async function main() {
   const password = process.env.DEMO_PASSWORD;
 
   console.log('');
+  if (profile) console.log(`Profile:       ${profile}`);
   console.log(`Authenticating as: ${email}`);
+  console.log(`Session dir:   ${homeSessionDir}`);
   console.log('');
 
   const contextOpts = {
@@ -199,7 +217,8 @@ async function main() {
       await context.storageState({ path: STATE_FILE });
       await checkPage.close();
       await browser.close();
-      console.log(`Already logged in as ${email} — session saved to ${homeSessionDir}`);
+      const profileLabel = profile ? ` [${profile}]` : '';
+      console.log(`✓ Already logged in as ${email}${profileLabel} — session saved to ${homeSessionDir}`);
       return;
     }
   } catch { /* not yet logged in */ }
@@ -288,7 +307,8 @@ async function main() {
   await browser.close();
 
   console.log('');
-  console.log(`Authenticated as ${email}`);
+  const profileLabel = profile ? ` [${profile}]` : '';
+  console.log(`✓ Authenticated as ${email}${profileLabel}`);
   console.log(`Session saved to: ${homeSessionDir}`);
 }
 
