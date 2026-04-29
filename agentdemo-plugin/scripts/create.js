@@ -41,20 +41,61 @@ function rl_ask(question) {
   });
 }
 
-/** Fully blocking Enter wait — does NOT return until user presses Enter */
+/** Blocking Enter wait with a 2-minute timeout.
+ *  Returns { timedOut: true } if timeout expired, { timedOut: false } if Enter was pressed. */
 function waitForEnter(message) {
+  // In detached/background mode, stdin is /dev/null or destroyed — skip immediately.
+  try {
+    if (!process.stdin || !process.stdin.readable || process.stdin.readableEnded) {
+      console.log('\n' + message + '\n  (no stdin — auto-continuing)');
+      return Promise.resolve({ timedOut: true });
+    }
+  } catch {
+    console.log('\n' + message + '\n  (stdin check failed — auto-continuing)');
+    return Promise.resolve({ timedOut: true });
+  }
+
   return new Promise((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-      terminal: false,
-    });
-    process.stdout.write('\n' + message + '\nPress Enter to continue... ');
-    rl.once('line', () => {
+    let rl;
+    try {
+      rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+        terminal: false,
+      });
+    } catch {
+      console.log('\n' + message + '\n  (readline failed — auto-continuing)');
+      return resolve({ timedOut: true });
+    }
+    process.stdout.write('\n' + message + '\nPress Enter to continue (auto-continues in 2 min)... ');
+    const timeout = setTimeout(() => {
+      console.log('\n  (2 min timeout — auto-continuing)');
       rl.close();
-      resolve();
+      resolve({ timedOut: true });
+    }, 2 * 60 * 1000);
+    rl.once('line', () => {
+      clearTimeout(timeout);
+      rl.close();
+      resolve({ timedOut: false });
     });
   });
+}
+
+/**
+ * Write a progress update to the job status file (background mode only).
+ * No-op when opts.statusFile is not set (CLI mode).
+ */
+function updateStatus(opts, patch) {
+  if (!opts?.statusFile) return;
+  try {
+    const cur = fs.existsSync(opts.statusFile)
+      ? JSON.parse(fs.readFileSync(opts.statusFile, 'utf8'))
+      : {};
+    fs.writeFileSync(
+      opts.statusFile,
+      JSON.stringify({ ...cur, ...patch, updated_at: new Date().toISOString() }, null, 2),
+    );
+  } catch { /* best-effort — don't break capture if status write fails */ }
 }
 
 /** Ensure the browser window is as large as possible on Windows */
@@ -1053,57 +1094,96 @@ async function handleConnectionRequest(page, platform, slideId, screenshotsDir, 
 
   const displayPlatform = detectedName || platform || 'your connected platform';
 
-  // 3a. Try to auto-click the "Connect to continue" button/card in chat
-  const autoClicked = await page.evaluate(() => {
-    const CONNECT_TEXTS = ['connect to continue', 'connect', 'authorize', 'sign in'];
-    // Try buttons and role="button" elements first (most specific)
-    const candidates = document.querySelectorAll('button, [role="button"], a');
-    for (const el of candidates) {
-      if (!el.offsetParent) continue; // skip hidden
-      const t = (el.textContent || '').trim().toLowerCase();
-      if (CONNECT_TEXTS.some(ct => t === ct || t === ct + ' to continue')) {
-        el.click();
-        return true;
-      }
-    }
-    // Try adaptive card action buttons (Copilot Studio connector approval cards)
-    const actionEls = document.querySelectorAll(
-      '[class*="adaptiveCard"] button, [class*="adaptive-card"] button, ' +
-      '[data-testid*="adaptive"] button, [class*="card-action" i], ' +
-      '[class*="cardAction" i], [class*="ac-pushButton" i]'
-    );
-    for (const el of actionEls) {
-      if (!el.offsetParent) continue;
-      const t = (el.textContent || '').trim().toLowerCase();
-      if (CONNECT_TEXTS.some(ct => t.includes(ct))) {
-        el.click();
-        return true;
-      }
-    }
-    // Last resort: click any visible element containing "connect to continue" text
-    const allEls = document.querySelectorAll('*');
-    for (const el of allEls) {
-      if (!el.offsetParent) continue;
-      if (el.children.length > 0) continue; // leaf nodes only
-      const t = (el.textContent || '').trim().toLowerCase();
-      if (t === 'connect to continue' || t === 'connect') {
-        el.click();
-        return true;
-      }
-    }
-    return false;
-  }).catch(() => false);
+  // 3a. Try to auto-click the consent dialog. M365 Copilot renders these as
+  // adaptive cards with an "Allow" button — try that first, then broader selectors.
+  const CONNECT_SELECTORS = [
+    // Primary: the Allow button inside the consent adaptive card
+    'button:has-text("Allow")',
+    '[role="button"]:has-text("Allow")',
+    // Adaptive card push buttons
+    '.ac-pushButton:has-text("Connect to continue")',
+    '.ac-pushButton:has-text("Connect")',
+    '[class*="ac-pushButton" i]:has-text("Connect")',
+    // Generic buttons
+    'button:has-text("Connect to continue")',
+    'button:has-text("Connect")',
+    '[role="button"]:has-text("Connect to continue")',
+    '[role="button"]:has-text("Connect")',
+  ];
 
-  if (autoClicked) {
-    console.log('  ↪ Auto-clicked "Connect to continue" — waiting for connection to establish...');
-    await page.waitForTimeout(6000);
-    // Check if connection was established (page may have reloaded or response appeared)
-    const stillConnecting = await detectConnectionRequest(page).catch(() => ({ detected: false }));
-    if (!stillConnecting.detected) {
-      console.log('  ✓ Connection established automatically');
-      return { ssPath, platform: displayPlatform, autoApproved: true };
+  let connectorLocator = null;
+  for (const sel of CONNECT_SELECTORS) {
+    try {
+      const loc = page.locator(sel).last();
+      if (await loc.isVisible({ timeout: 1500 })) { connectorLocator = loc; break; }
+    } catch { /* not found, try next */ }
+  }
+
+  if (connectorLocator) {
+    try {
+      // Listen for an OAuth popup BEFORE clicking
+      const popupPromise = page.context().waitForEvent('page', { timeout: 8000 }).catch(() => null);
+      const btnLabel = await connectorLocator.textContent().catch(() => 'button');
+      console.log(`  ↪ Auto-clicking "${btnLabel.trim()}"...`);
+      await connectorLocator.click();
+
+      // Handle any OAuth popup that opens
+      const popup = await popupPromise;
+      if (popup) {
+        console.log('  ↪ OAuth popup opened — waiting for auto-complete...');
+        await popup.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+        await popup.waitForTimeout(3000);
+        // Try to click Allow/Accept/Continue if present
+        for (const btnText of ['Allow', 'Accept', 'Continue', 'Yes']) {
+          try {
+            const btn = popup.locator(`button:has-text("${btnText}")`).first();
+            if (await btn.isVisible({ timeout: 2000 })) {
+              await btn.click();
+              console.log(`  ↪ Clicked "${btnText}" in OAuth popup`);
+              break;
+            }
+          } catch { /* try next */ }
+        }
+        // Wait for popup to close (means OAuth completed)
+        await popup.waitForEvent('close', { timeout: 15000 }).catch(() => {});
+        console.log('  ↪ OAuth popup closed');
+      }
+
+      // After any click, also check for an in-page Allow/Accept dialog
+      // (M365 sometimes shows a second step confirmation on the same page)
+      await page.waitForTimeout(2000);
+      for (const inPageSel of [
+        'button:has-text("Allow")', '[role="button"]:has-text("Allow")',
+        'button:has-text("Accept")', 'button:has-text("Confirm")',
+      ]) {
+        try {
+          const btn = page.locator(inPageSel).last();
+          if (await btn.isVisible({ timeout: 2000 })) {
+            const label = await btn.textContent().catch(() => inPageSel);
+            await btn.click();
+            console.log(`  ↪ Clicked in-page "${label.trim()}" button`);
+            await page.waitForTimeout(2000);
+            break;
+          }
+        } catch { /* not found */ }
+      }
+
+      // Give the agent time to process after connection approval (it may
+      // immediately continue the original request and start responding)
+      console.log('  ↪ Waiting for agent to process connection...');
+      await page.waitForTimeout(8000);
+
+      const stillConnecting = await detectConnectionRequest(page).catch(() => ({ detected: false }));
+      if (!stillConnecting.detected) {
+        console.log('  ✓ Connection established automatically');
+        return { ssPath, platform: displayPlatform, autoApproved: true };
+      }
+      console.log('  ⚠ Connection still pending after auto-click — falling back to manual approval');
+    } catch (clickErr) {
+      console.log(`  ⚠ Auto-click failed: ${clickErr.message?.substring(0, 60)} — falling back to manual approval`);
     }
-    console.log('  ⚠ Auto-click did not resolve the connection — falling back to manual approval');
+  } else {
+    console.log('  ⚠ Consent button not found in page — falling back to manual approval');
   }
 
   // 3b. Print pause message (auto-click failed or not available)
@@ -1141,11 +1221,15 @@ async function handleConnectionRequest(page, platform, slideId, screenshotsDir, 
     console.log('  └─────────────────────────────────────────────┘');
   }
 
-  // 4. BLOCKING WAIT — nothing runs until user presses Enter
-  await waitForEnter('  Approve the connection in the browser, then:');
-  console.log('  RESUMED — user pressed Enter');
+  // 4. BLOCKING WAIT — 2 min timeout, then auto-continue
+  const { timedOut } = await waitForEnter('  Approve the connection in the browser, then:');
+  if (timedOut) {
+    console.log('  ⚠ Connection approval timed out — skipping remaining prompts');
+  } else {
+    console.log('  RESUMED — user pressed Enter');
+  }
 
-  return { ssPath, platform: displayPlatform };
+  return { ssPath, platform: displayPlatform, timedOut };
 }
 
 /**
@@ -1272,7 +1356,7 @@ async function captureRecipientInbox(recipientUrl, profile, slideId, screenshots
   return ssPath;
 }
 
-async function autoCapture(page, m365Url, discovered, demoDir, generatedScript = null, headless = false, captureOpts = {}) {
+async function autoCapture(page, m365Url, discovered, demoDir, generatedScript = null, headless = false, captureOpts = {}, runOpts = {}) {
   const { outlookRecipientUrl, outlookRecipientProfile = 'recipient' } = captureOpts;
   const screenshotsDir = path.join(demoDir, 'screenshots');
   const clipsDir = path.join(demoDir, 'clips');
@@ -1355,6 +1439,51 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
           try { await tab.waitForSelector(sel, { timeout: 15000 }); break; } catch { /* next */ }
         }
         await tab.waitForTimeout(2000);
+
+        // Build subject keywords from agent name, discovered context, and conn-level hint.
+        // conn.subject_keywords can be set when the user provides an email subject via instructions.
+        const agentWords = (discovered.name || '').toLowerCase().split(/\s+/).filter(w => w.length > 3);
+        const connSubjectHint = (conn.subject_keywords || conn.email_subject || '').toLowerCase();
+        const connKeywords = connSubjectHint.split(/[,|]/).map(s => s.trim()).filter(Boolean);
+        const SUBJECT_KEYWORDS = [...new Set([...connKeywords, ...agentWords])];
+
+        // Click the most recent email so the body is visible in the screenshot.
+        // Prefer an email whose subject contains the agent/client name; fall back to the first item.
+        const emailOpened = await tab.evaluate((keywords) => {
+          // Outlook renders each mail row as a div with role="option" or inside a listbox
+          const rows = Array.from(document.querySelectorAll(
+            '[role="option"], [role="listitem"], [data-convid], [data-testid*="mail-item" i], ' +
+            '[class*="mailListItem" i], [class*="ms-List-cell"]'
+          )).filter(el => el.offsetParent !== null);
+
+          // First pass: prefer a row whose visible text contains a keyword
+          if (keywords.length > 0) {
+            for (const row of rows) {
+              const t = (row.textContent || '').toLowerCase();
+              if (keywords.some(kw => kw && t.includes(kw))) {
+                row.click();
+                return true;
+              }
+            }
+          }
+          // Second pass: just click the first visible row
+          if (rows[0]) { rows[0].click(); return true; }
+          return false;
+        }, SUBJECT_KEYWORDS).catch(() => false);
+
+        if (emailOpened) {
+          // Wait for the reading pane to populate
+          await tab.waitForTimeout(3000);
+          // Ensure the email body has loaded
+          const bodySelectors = [
+            '[data-testid="messageBody"]', '[aria-label*="Message body"]',
+            '.allowTextSelection', '[class*="readingPane" i]', '[role="main"] [class*="body" i]',
+          ];
+          for (const sel of bodySelectors) {
+            try { await tab.waitForSelector(sel, { timeout: 5000 }); break; } catch { /* next */ }
+          }
+          await tab.waitForTimeout(1000);
+        }
 
       } else {
         await tab.waitForTimeout(3000);
@@ -1439,6 +1568,8 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
       }
       console.log('');
     }
+
+    updateStatus(runOpts, { slides_captured: slides.length, phase: 'capturing' });
 
     // Find chat input — try targeted selectors in order.
     // M365 Copilot uses a Lexical rich text editor, so the actual input
@@ -1534,12 +1665,40 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
         screenshot: ssPath, clip: null, prompt: null, callout: null,
       });
     } else {
-      // ── Build steps — three strategies in priority order ──
+      // ── Build steps — four strategies in priority order ──
       let steps = [];
 
+      // Strategy 0: Explicit --prompts flag (highest priority — bypasses AI entirely)
+      if (runOpts.prompts && runOpts.prompts.length > 0) {
+        const promptList = Array.isArray(runOpts.prompts) ? runOpts.prompts : [runOpts.prompts];
+        steps = promptList.map((p, i) => ({
+          prompt: p, slide_label: '', extract_entity: false, entity_context: null, capture_platform_after: null,
+        }));
+        console.log(`  Using ${steps.length} explicit prompts from --prompts flag`);
+      }
+
+      // Strategy 0b: Parse "Start with this prompt: X" out of instructions.
+      // This lets users specify a literal first message inside the instructions field
+      // without going through the AI script generator.
+      let forcedFirstPrompt = null;
+      if (discovered.instructions) {
+        const starterMatch = discovered.instructions.match(
+          /start(?:ing)?\s+with\s+(?:this\s+)?prompt\s*[:—\-]\s*["']?([^"'\n]{5,200})["']?/i
+        );
+        if (starterMatch) {
+          forcedFirstPrompt = starterMatch[1].trim();
+          console.log(`  ✓ Found forced first prompt in instructions: "${forcedFirstPrompt.substring(0, 60)}..."`);
+        }
+      }
+
       // Strategy 1: AI-generated conversation script
-      if (generatedScript && generatedScript.steps && generatedScript.steps.length > 0) {
+      if (steps.length === 0 && generatedScript && generatedScript.steps && generatedScript.steps.length > 0) {
         steps = generatedScript.steps.slice(0, 12);
+        // If a forced first prompt was extracted, replace the AI's first step with it
+        if (forcedFirstPrompt) {
+          steps[0] = { ...steps[0], prompt: forcedFirstPrompt };
+          console.log(`  ✓ Replaced AI step 1 with forced first prompt`);
+        }
         console.log(`  Using ${steps.length} AI-generated script steps`);
       }
 
@@ -1642,15 +1801,43 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
               const connResult = await handleConnectionRequest(page, connCheck.platform, slideId, screenshotsDir, headless);
               connectionEvents.push({ platform: connResult.platform, screenshotPath: connResult.ssPath });
               connectionDetected = true;
+
+              // If connection approval timed out, skip remaining prompts
+              if (connResult.timedOut) {
+                console.log('    ⚠ Connection timed out — adding remaining prompts as incomplete slides');
+                // Add current prompt as incomplete slide with connection screenshot
+                slides.push({
+                  id: slideId++, platform: 'm365-copilot', type: 'agent',
+                  screenshot: connResult.ssPath, clip: null, prompt: promptText, callout: null,
+                  storyLabel: step.slide_label || '', partial: true, needsReview: true,
+                });
+                // Add remaining unsent prompts as placeholder slides
+                for (let j = i + 1; j < steps.length; j++) {
+                  let pendingPrompt = steps[j].prompt;
+                  if (extractedEntity && pendingPrompt.includes('[ENTITY]')) {
+                    pendingPrompt = pendingPrompt.replace(/\[ENTITY\]/g, extractedEntity);
+                  }
+                  slides.push({
+                    id: slideId++, platform: 'm365-copilot', type: 'agent',
+                    screenshot: null, clip: null, prompt: pendingPrompt, callout: null,
+                    storyLabel: steps[j].slide_label || '', placeholder: true,
+                    placeholderInfo: { what_to_capture: `Agent response to: "${pendingPrompt.substring(0, 80)}"`, setup_required: 'Re-run demo or manually screenshot this prompt response' },
+                  });
+                }
+                updateStatus(runOpts, { slides_captured: slides.length, phase: 'capturing' });
+                break; // exit the for loop — proceed to HTML generation
+              }
             }
           }
 
           // Connection approval resets the thread — re-navigate and retry
-          if (connectionDetected) {
+          if (connectionDetected && !connectionEvents.some(e => e.timedOut)) {
             console.log('    Retrying prompt after connection approval...');
             await page.goto(m365Url, { waitUntil: 'domcontentloaded', timeout: 60000 });
             await page.waitForLoadState('networkidle').catch(() => {});
-            await page.waitForTimeout(8000);
+            // Extra wait — the agent needs time to register the new connection
+            // and re-establish the session context before it can respond correctly
+            await page.waitForTimeout(12000);
             await dismissPopups(page);
             await verifyAgentLoaded(page, discovered.name, m365Url);
             try {
@@ -1689,6 +1876,10 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
                 console.log(`    ↪ Connection approval detected — handling in follow-through loop`);
                 const connResult = await handleConnectionRequest(page, connCheck.platform, slideId, screenshotsDir, headless);
                 connectionEvents.push({ platform: connResult.platform, screenshotPath: connResult.ssPath });
+                if (connResult.timedOut) {
+                  console.log('    ⚠ Connection timed out in follow-through — breaking out');
+                  break; // exit follow-through loop
+                }
                 // After approval, re-navigate and re-send the original prompt
                 console.log('    Retrying prompt after connection approval...');
                 await page.goto(m365Url, { waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -1885,6 +2076,9 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
             storyLabel: step.slide_label || '',
           });
         }
+
+        // Update progress after each step
+        updateStatus(runOpts, { slides_captured: slides.length, phase: 'capturing' });
       }
     }
   } catch (err) {
@@ -2493,6 +2687,7 @@ export async function runCreate(opts) {
   const valid = await isSessionValid(context);
   if (!valid) {
     console.log('  ✗ Session expired. Run: agentdemo auth');
+    updateStatus(opts, { state: 'failed', error: 'Session expired. Run: agentdemo auth' });
     await browser.close();
     return;
   }
@@ -2504,6 +2699,8 @@ export async function runCreate(opts) {
   try {
     // STEP 2: Auto-discover from Copilot Studio
     discovered = await discoverFromStudio(activePage, studioUrl);
+
+    updateStatus(opts, { state: 'running', phase: 'discovery_complete' });
 
     // Always apply explicitly-provided agent name/instructions (takes priority over auto-discovery)
     if (opts.agentName) discovered.name = opts.agentName;
@@ -2548,7 +2745,6 @@ export async function runCreate(opts) {
 
     // STEP 2B: Attach platform URLs from CLI flags / MCP params
     const PLATFORM_URL_MAP = {
-      'sharepoint':     opts.sharepointUrl,
       'power-automate': opts.powerAutomateUrl,
       'teams':          opts.teamsUrl,
       'outlook':        opts.outlookUrl,
@@ -2576,6 +2772,20 @@ export async function runCreate(opts) {
       }
     }
 
+    // Handle --sharepoint-url (variadic — can be string or array)
+    if (opts.sharepointUrl) {
+      const spUrls = Array.isArray(opts.sharepointUrl) ? opts.sharepointUrl : [opts.sharepointUrl];
+      for (let i = 0; i < spUrls.length; i++) {
+        const label = spUrls.length === 1 ? 'sharepoint' : `sharepoint-${i + 1}`;
+        const existing = i === 0 ? discovered.connections.find(c => c.platform === 'sharepoint') : null;
+        if (existing) {
+          existing.url = spUrls[i];
+        } else {
+          discovered.connections.push({ name: label, platform: 'sharepoint', url: spUrls[i] });
+        }
+      }
+    }
+
     // Handle --custom-url (variadic — can be string or array)
     if (opts.customUrl) {
       const customUrls = Array.isArray(opts.customUrl) ? opts.customUrl : [opts.customUrl];
@@ -2586,6 +2796,7 @@ export async function runCreate(opts) {
 
     // STEP 2C: Generate demo script via AI (before capture)
     const generatedScript = await generateDemoScript(discovered);
+    updateStatus(opts, { phase: 'script_generated', agent_name: discovered.name, slug: makeSlug(discovered.name) });
     // Update intro hook if AI provided one
     if (generatedScript?.hook) {
       discovered.hook = generatedScript.hook;
@@ -2601,13 +2812,14 @@ export async function runCreate(opts) {
     const captureResult = await autoCapture(activePage, m365Url, discovered, demoDir, generatedScript, headless, {
       outlookRecipientUrl: opts.outlookRecipientUrl,
       outlookRecipientProfile: opts.outlookRecipientProfile,
-    });
+    }, opts);
     slides = captureResult.slides;
     const connectionEvents = captureResult.connectionEvents || [];
 
     // Close browser before API calls
     await activePage.close().catch(() => {});
     await activeBrowser.close().catch(() => {});
+    updateStatus(opts, { phase: 'capture_complete', slides_captured: slides.length });
     console.log('');
 
     // Insert connection setup slide if connections were encountered
@@ -2645,6 +2857,7 @@ export async function runCreate(opts) {
 
     // STEP 4: Generate callout text for captured slides
     await generateCallouts(slides, discovered.name, discovered.description);
+    updateStatus(opts, { phase: 'callouts_generated' });
 
     // STEP 4B: Generate placeholder instructions
     await generatePlaceholderInfo(slides, discovered.name, discovered.description);
@@ -2656,6 +2869,7 @@ export async function runCreate(opts) {
     const htmlPath = path.join(outputDir, 'demo.html');
     fs.writeFileSync(htmlPath, html);
     console.log(`    ✓ Written: ${htmlPath}`);
+    updateStatus(opts, { phase: 'html_generated', output_path: htmlPath, slug: makeSlug(discovered.name) });
 
     // STEP 5B: Generate PLACEHOLDER-GUIDE.md if needed
     const demoSlug = makeSlug(discovered.name);
@@ -2721,6 +2935,35 @@ export async function runCreate(opts) {
 
     console.log('');
 
+    // Teams notification (if webhook configured)
+    const teamsWebhookUrl = process.env.TEAMS_WEBHOOK_URL;
+    if (teamsWebhookUrl) {
+      try {
+        await fetch(teamsWebhookUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: 'message',
+            attachments: [{
+              contentType: 'application/vnd.microsoft.card.adaptive',
+              content: {
+                type: 'AdaptiveCard',
+                version: '1.2',
+                body: [
+                  { type: 'TextBlock', size: 'Large', weight: 'Bolder', text: `✅ Demo Ready — ${discovered.name}` },
+                  { type: 'TextBlock', text: `${slides.length} slides captured successfully.` },
+                  { type: 'TextBlock', text: `Open demo.html from: ${htmlPath}`, wrap: true },
+                ],
+              },
+            }],
+          }),
+        });
+        console.log('  ✓ Teams notification sent');
+      } catch (notifyErr) {
+        console.log(`  ⚠ Teams notification failed: ${notifyErr.message}`);
+      }
+    }
+
     // Open in default browser
     try {
       const open = (await import('open')).default;
@@ -2732,6 +2975,7 @@ export async function runCreate(opts) {
 
   } catch (err) {
     console.log(`\n  ✗ Error: ${err.message}`);
+    updateStatus(opts, { state: 'failed', error: err.message });
     await activePage.close().catch(() => {});
     await activeBrowser.close().catch(() => {});
   }
