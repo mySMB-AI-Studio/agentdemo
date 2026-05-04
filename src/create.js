@@ -1000,71 +1000,82 @@ const PLATFORM_DISPLAY = {
   'custom': 'Custom Platform',
 };
 
-/** Detect connection approval requests in the page */
+/** Detect connection approval requests in the page.
+ *
+ * IMPORTANT: agent error messages ("I cannot access your EHR") contain the
+ * same keywords as real consent cards.  We therefore REQUIRE an actual
+ * interactive element (button / adaptive-card push-button / link) to be
+ * present on the page before declaring a connection request detected.
+ * Keywords in agent text alone are NOT sufficient.
+ */
 async function detectConnectionRequest(page) {
   return page.evaluate(() => {
-    const CONNECTION_KEYWORDS = [
-      'connect to', 'sign in to', 'authorize', 'approve',
-      'connection required', 'action required', 'please connect',
-      'needs access to', 'connect your', 'sign-in required',
-      'connection manager',
-    ];
-
-    // Words that are UI labels, NOT platform names
-    const SKIP_WORDS = new Set([
-      'open', 'close', 'cancel', 'confirm', 'ok', 'yes', 'no',
-      'connect', 'sign', 'authorize', 'connection', 'manager',
-      'settings', 'here', 'click', 'link', 'button', 'more',
-      'learn', 'this', 'the', 'your', 'a', 'an', 'to', 'in',
-      'required', 'action', 'please', 'now', 'continue',
+    const CONNECT_BTN_TEXTS = new Set([
+      'connect', 'connect to continue', 'sign in', 'allow', 'authorize', 'permit',
     ]);
 
-    function cleanPlatformName(raw) {
-      if (!raw) return '';
-      const name = raw.trim().replace(/[\.\,\!\?]+$/, '').trim();
-      if (name.length < 2 || name.length > 50) return '';
-      if (SKIP_WORDS.has(name.toLowerCase())) return '';
-      // Also skip if ALL words are skip words
-      const words = name.split(/\s+/);
-      if (words.every(w => SKIP_WORDS.has(w.toLowerCase()))) return '';
-      return name;
+    function extractPlatform() {
+      const SKIP = new Set([
+        'open','close','cancel','confirm','ok','yes','no','connect','sign','authorize',
+        'connection','manager','settings','here','click','link','button','more','learn',
+        'this','the','your','a','an','to','in','required','action','please','now','continue',
+      ]);
+      function clean(raw) {
+        if (!raw) return '';
+        const n = raw.trim().replace(/[\.\,\!\?]+$/, '').trim();
+        if (n.length < 2 || n.length > 50) return '';
+        if (SKIP.has(n.toLowerCase())) return '';
+        if (n.split(/\s+/).every(w => SKIP.has(w.toLowerCase()))) return '';
+        return n;
+      }
+      const els = document.querySelectorAll('button, a, [role="button"], [class*="message" i]');
+      for (const el of els) {
+        const t = el.textContent || '';
+        for (const re of [/connect\s+to\s+(.+)/i, /sign\s+in\s+to\s+(.+)/i, /authorize\s+(.+)/i, /access\s+to\s+(.+)/i]) {
+          const m = t.match(re);
+          const name = clean(m?.[1]);
+          if (name) return name;
+        }
+      }
+      return 'your connected platform';
     }
 
-    // Check for modal/dialog
+    // ── 1. Adaptive card push button (strongest signal) ──────────────────────
+    const acBtn = document.querySelector('.ac-pushButton, [class*="ac-pushButton" i]');
+    if (acBtn && acBtn.offsetParent !== null) {
+      return { detected: true, platform: extractPlatform(), source: 'ac-button' };
+    }
+
+    // ── 2. Visible button / link with exact connection text ───────────────────
+    for (const b of document.querySelectorAll('button, [role="button"], a[href]')) {
+      if (!b.offsetParent) continue; // not visible
+      const t = (b.textContent?.trim() || '').toLowerCase();
+      if (CONNECT_BTN_TEXTS.has(t) || t.startsWith('connect to ') || t.startsWith('sign in to ')) {
+        return { detected: true, platform: extractPlatform(), source: 'button' };
+      }
+    }
+
+    // ── 3. Modal/dialog with connection keywords ──────────────────────────────
     const dialog = document.querySelector('[role="dialog"], [class*="modal" i], [class*="dialog" i]');
     if (dialog && dialog.offsetParent !== null) {
-      const dt = dialog.textContent?.toLowerCase() || '';
-      for (const kw of CONNECTION_KEYWORDS) {
-        if (dt.includes(kw)) {
-          const match = dt.match(/(?:connect to|sign in to|authorize|access to)\s+([A-Za-z0-9\s]+?)(?:\.|,|$|\s+to\s)/i);
-          const name = cleanPlatformName(match?.[1]);
-          return { detected: true, platform: name || 'your connected platform', source: 'dialog' };
-        }
+      const dt = (dialog.textContent || '').toLowerCase();
+      if (/connect to|sign in to|authorize|connection required/i.test(dt)) {
+        return { detected: true, platform: extractPlatform(), source: 'dialog' };
       }
     }
 
-    // Check the last few messages in chat
+    // ── 4. Chat message containing keywords + an interactive child element ────
+    // Agent error messages contain keywords but have NO buttons inside them.
+    // Only fire if the message element itself contains a clickable child.
     const msgs = document.querySelectorAll('[class*="message" i], [class*="response" i], [role="listitem"]');
     for (let i = Math.max(0, msgs.length - 3); i < msgs.length; i++) {
-      const text = msgs[i]?.textContent?.toLowerCase() || '';
-      for (const kw of CONNECTION_KEYWORDS) {
-        if (text.includes(kw)) {
-          const match = text.match(/(?:connect to|sign in to|authorize|access to)\s+([A-Za-z0-9\s]+?)(?:\.|,|$|\s+to\s)/i);
-          const name = cleanPlatformName(match?.[1]);
-          return { detected: true, platform: name || 'your connected platform', source: 'chat' };
-        }
-      }
-    }
-
-    // Check for "Connect" or "Authorize" buttons in chat area
-    const btns = document.querySelectorAll('button, a');
-    for (const b of btns) {
-      const t = b.textContent?.trim() || '';
-      const tl = t.toLowerCase();
-      if ((tl === 'connect' || tl === 'authorize' || tl === 'sign in' || tl.startsWith('connect to'))
-          && b.offsetParent !== null) {
-        const name = cleanPlatformName(t.replace(/^connect\s+to\s*/i, ''));
-        return { detected: true, platform: name || 'your connected platform', source: 'button' };
+      const msg = msgs[i];
+      const text = (msg?.textContent || '').toLowerCase();
+      if (!/connect to|sign in to|connection required|needs access to/i.test(text)) continue;
+      // Require an actual clickable element inside this specific message bubble
+      const innerBtn = msg.querySelector('button, [role="button"], a[href], .ac-pushButton, [class*="ac-pushButton" i]');
+      if (innerBtn && innerBtn.offsetParent !== null) {
+        return { detected: true, platform: extractPlatform(), source: 'chat+button' };
       }
     }
 
