@@ -974,6 +974,32 @@ async function scrollAndScreenshot(page, screenshotPath) {
   }
 }
 
+// Platform display names — module-level so callout generation can reference them too
+const PLATFORM_DISPLAY = {
+  'sharepoint': 'SharePoint',
+  'power-automate': 'Power Automate',
+  'teams': 'Microsoft Teams',
+  'outlook': 'Outlook',
+  'xero': 'Xero',
+  'custom': 'Custom Platform',
+};
+
+/** Press End key and scroll all chat containers to bottom.
+ *  Call before typing a prompt or looking for the Allow button — the card
+ *  and the input box may both be below the fold in a long conversation. */
+async function scrollChatToBottom(page) {
+  await page.keyboard.press('End').catch(() => {});
+  await page.waitForTimeout(300);
+  await page.evaluate(() => {
+    const containers = document.querySelectorAll(
+      '[class*="chat"], [class*="conversation"], [class*="messages"], [role="log"]'
+    );
+    containers.forEach(c => { c.scrollTop = c.scrollHeight; });
+    window.scrollTo(0, document.body.scrollHeight);
+  }).catch(() => {});
+  await page.waitForTimeout(200);
+}
+
 /** Detect connection approval requests in the page */
 async function detectConnectionRequest(page) {
   return page.evaluate(() => {
@@ -1094,21 +1120,31 @@ async function handleConnectionRequest(page, platform, slideId, screenshotsDir, 
 
   const displayPlatform = detectedName || platform || 'your connected platform';
 
-  // 3a. Try to auto-click the consent dialog. M365 Copilot renders these as
+  // 3a. Scroll to bottom — the Allow button is often below the fold in a long chat.
+  console.log('  ↪ Scrolling to bottom to reveal consent card...');
+  await scrollChatToBottom(page);
+  await page.waitForTimeout(500); // extra settle after scroll
+
+  // 3b. Try to auto-click the consent dialog. M365 Copilot renders these as
   // adaptive cards with an "Allow" button — try that first, then broader selectors.
   const CONNECT_SELECTORS = [
-    // Primary: the Allow button inside the consent adaptive card
+    // Primary: consent card action buttons
     'button:has-text("Allow")',
+    'button:has-text("Permit")',
+    'button:has-text("Connect")',
+    'button:has-text("Authorize")',
+    'button:has-text("Sign in")',
+    '[data-testid*="allow"]',
+    // Role-button variants
     '[role="button"]:has-text("Allow")',
+    '[role="button"]:has-text("Connect")',
     // Adaptive card push buttons
     '.ac-pushButton:has-text("Connect to continue")',
     '.ac-pushButton:has-text("Connect")',
     '[class*="ac-pushButton" i]:has-text("Connect")',
-    // Generic buttons
+    // Broader variants
     'button:has-text("Connect to continue")',
-    'button:has-text("Connect")',
     '[role="button"]:has-text("Connect to continue")',
-    '[role="button"]:has-text("Connect")',
   ];
 
   let connectorLocator = null;
@@ -1121,6 +1157,10 @@ async function handleConnectionRequest(page, platform, slideId, screenshotsDir, 
 
   if (connectorLocator) {
     try {
+      // Scroll the button into the viewport before clicking
+      await connectorLocator.scrollIntoViewIfNeeded().catch(() => {});
+      await page.waitForTimeout(500);
+
       // Listen for an OAuth popup BEFORE clicking
       const popupPromise = page.context().waitForEvent('page', { timeout: 8000 }).catch(() => null);
       const btnLabel = await connectorLocator.textContent().catch(() => 'button');
@@ -1366,16 +1406,6 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
   const slides = [];
   const connectionEvents = []; // { platform, screenshotPath } — for connection setup slide
   let slideId = 1;
-
-  // ── Platform display names ──
-  const PLATFORM_DISPLAY = {
-    'sharepoint': 'SharePoint',
-    'power-automate': 'Power Automate',
-    'teams': 'Microsoft Teams',
-    'outlook': 'Outlook',
-    'xero': 'Xero',
-    'custom': 'Custom Platform',
-  };
 
   // ── Platform capture helper — opens a new tab, screenshots, closes it ──
   // Keeps the main M365 chat page intact throughout the entire capture.
@@ -1776,6 +1806,8 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
         try {
           // ── All prompts stay in the SAME chat thread ──
           // M365 Copilot uses a Lexical rich text editor — fill() won't work.
+          // Scroll to bottom first — ensures the input box and latest message are visible.
+          await scrollChatToBottom(page);
           const inputLocator = page.locator(INPUT_SEL).last();
           await inputLocator.waitFor({ state: 'visible', timeout: 15000 });
           await inputLocator.click();
@@ -1840,6 +1872,9 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
             await page.waitForTimeout(12000);
             await dismissPopups(page);
             await verifyAgentLoaded(page, discovered.name, m365Url);
+            // Scroll to bottom so the input is visible before retyping the prompt
+            await scrollChatToBottom(page);
+            await page.waitForTimeout(500);
             try {
               const retryLocator = page.locator(INPUT_SEL).last();
               await retryLocator.waitFor({ state: 'visible', timeout: 15000 });
@@ -1887,6 +1922,9 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
                 await page.waitForTimeout(8000);
                 await dismissPopups(page);
                 await verifyAgentLoaded(page, discovered.name, m365Url);
+                // Scroll to bottom so the input is visible before retyping the prompt
+                await scrollChatToBottom(page);
+                await page.waitForTimeout(500);
                 try {
                   const retryLocator = page.locator(INPUT_SEL).last();
                   await retryLocator.waitFor({ state: 'visible', timeout: 15000 });
