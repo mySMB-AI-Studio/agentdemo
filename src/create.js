@@ -1147,19 +1147,30 @@ async function handleConnectionRequest(page, platform, slideId, screenshotsDir, 
     '[role="button"]:has-text("Connect to continue")',
   ];
 
+  // Find the consent button — check DOM presence first, then scroll into view.
+  // Do NOT rely on isVisible() alone: the button is often just 1–2px below the fold
+  // and Playwright considers out-of-viewport elements invisible even when rendered.
   let connectorLocator = null;
   for (const sel of CONNECT_SELECTORS) {
     try {
       const loc = page.locator(sel).last();
-      if (await loc.isVisible({ timeout: 1500 })) { connectorLocator = loc; break; }
-    } catch { /* not found, try next */ }
+      const count = await loc.count().catch(() => 0);
+      if (count > 0) {
+        // Scroll it into the viewport, then verify it became visible
+        await loc.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+        await page.waitForTimeout(300);
+        if (await loc.isVisible({ timeout: 2000 }).catch(() => false)) {
+          connectorLocator = loc;
+          break;
+        }
+      }
+    } catch { /* try next */ }
   }
 
   if (connectorLocator) {
     try {
-      // Scroll the button into the viewport before clicking
-      await connectorLocator.scrollIntoViewIfNeeded().catch(() => {});
-      await page.waitForTimeout(500);
+      // Button is already scrolled into view from the search loop above
+      await page.waitForTimeout(200);
 
       // Listen for an OAuth popup BEFORE clicking
       const popupPromise = page.context().waitForEvent('page', { timeout: 8000 }).catch(() => null);
