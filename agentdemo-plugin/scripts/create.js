@@ -299,14 +299,21 @@ async function discoverFromStudio(page, studioUrl) {
 
     // Studio sometimes restores the last-visited agent from session state instead
     // of navigating to the requested bot ID. Detect this and force a hard reload.
-    const botIdMatch = studioUrl.match(/bots\/([a-f0-9-]+)\//i);
+    // Note: trailing slash may be absent in user-supplied URLs — match with /?
+    const botIdMatch = studioUrl.match(/bots\/([a-f0-9-]+)\/?/i);
     if (botIdMatch && !landedUrl.includes(botIdMatch[1])) {
       console.log(`    ⚠ Studio loaded a different agent (session restore). Forcing reload...`);
-      await page.goto(studioUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      await page.waitForTimeout(3000);
+      // Ensure URL has /overview suffix so Studio navigates to the right page
+      const targetUrl = studioUrl.replace(/\/?$/, '/overview');
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      // Wait longer after forced reload — Studio SPA needs time to swap to the correct agent
+      await page.waitForTimeout(6000);
+      await dismissPopups(page);
       const reloadedUrl = page.url();
       if (!reloadedUrl.includes(botIdMatch[1])) {
         console.log(`    ⚠ Still on wrong agent after reload — Studio may redirect to home on first visit.`);
+      } else {
+        console.log(`    ✓ Loaded correct agent after reload.`);
       }
     }
 
@@ -625,7 +632,7 @@ async function askManualFallback(discovered) {
 // STEP 2C: Generate demo script via Anthropic API
 // ───────────────────────────────────────────
 
-async function generateDemoScript(discovered) {
+async function generateDemoScript(discovered, guidedPrompts = null) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return null; // caller will use welcome screen prompts instead
 
@@ -649,10 +656,26 @@ async function generateDemoScript(discovered) {
       }).join('\n')
     : '  (none discovered)';
 
+  const hasGuidedPrompts = guidedPrompts && guidedPrompts.length > 0;
+  const verbatimSignals = ['use exactly', 'verbatim', 'word for word', 'in order', 'as written', 'as-is', 'as is', 'exact order', 'do not change', 'do not rephrase'];
+  const isVerbatim = hasGuidedPrompts && discovered.instructions &&
+    verbatimSignals.some(s => discovered.instructions.toLowerCase().includes(s));
+
+  const guidedPromptsSection = hasGuidedPrompts ? `
+Suggested conversation prompts:
+${guidedPrompts.map((p, i) => `  ${i + 1}. "${p}"`).join('\n')}
+` : '';
+
+  const stepCountInstruction = hasGuidedPrompts
+    ? (isVerbatim
+        ? `Generate exactly ${guidedPrompts.length} steps using the suggested prompts VERBATIM and IN THIS EXACT ORDER. Do not rephrase or reorder them.`
+        : `Design a conversation of approximately ${guidedPrompts.length} steps, using the suggested prompts above as guidance. You may rephrase, adapt, or adjust them to ensure the conversation flows naturally. Cover the same scenarios and intent but do not be constrained by exact wording.`)
+    : 'Design a conversation of 3–6 steps. The steps must flow logically as a real user session — each step builds on the previous response. The conversation should demonstrate a complete end-to-end workflow from discovery through to action.';
+
   try {
     const response = await client.messages.create({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 1500,
+      max_tokens: 2000,
       messages: [{
         role: 'user',
         content: `You are helping create a product demo for an AI agent. Your job is to design a realistic, flowing CONVERSATION that tells a compelling business story in a single chat thread.
@@ -663,8 +686,8 @@ Agent instructions: ${discovered.instructions || 'Not provided'}
 Copilot Studio topics (agent capabilities):
 ${topicsSummary}
 Connected platforms: ${platforms}
-
-Design a conversation of 3–6 steps. The steps must flow logically as a real user session — each step builds on the previous response. The conversation should demonstrate a complete end-to-end workflow from discovery through to action.
+${guidedPromptsSection}
+${stepCountInstruction}
 
 Rules:
 - Use [ENTITY] as a placeholder in a prompt when the actual value (e.g. a record name, licence number, person name) will only be known after reading the PREVIOUS step's agent response
@@ -1011,7 +1034,7 @@ async function scrollChatToBottom(page) {
 async function detectConnectionRequest(page) {
   return page.evaluate(() => {
     const CONNECT_BTN_TEXTS = new Set([
-      'connect', 'connect to continue', 'sign in', 'allow', 'authorize', 'permit',
+      'connect', 'connect to continue', 'sign in', 'allow', 'authorize', 'permit', 'continue',
     ]);
 
     function extractPlatform() {
@@ -1145,14 +1168,18 @@ async function handleConnectionRequest(page, platform, slideId, screenshotsDir, 
     'button:has-text("Connect")',
     'button:has-text("Authorize")',
     'button:has-text("Sign in")',
+    'button:has-text("Continue")',
     '[data-testid*="allow"]',
     // Role-button variants
     '[role="button"]:has-text("Allow")',
     '[role="button"]:has-text("Connect")',
+    '[role="button"]:has-text("Continue")',
     // Adaptive card push buttons
     '.ac-pushButton:has-text("Connect to continue")',
     '.ac-pushButton:has-text("Connect")',
+    '.ac-pushButton:has-text("Continue")',
     '[class*="ac-pushButton" i]:has-text("Connect")',
+    '[class*="ac-pushButton" i]:has-text("Continue")',
     // Broader variants
     'button:has-text("Connect to continue")',
     '[role="button"]:has-text("Connect to continue")',
@@ -1591,10 +1618,11 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
       const platform = conn.platform;
       const displayName = PLATFORM_DISPLAY[platform] || platform;
 
-      // Skip the coordinator's Outlook initial slide when a recipient inbox is configured —
-      // the recipient's open email is a more meaningful Outlook proof-point.
-      if (platform === 'outlook' && outlookRecipientUrl) {
-        console.log(`  ● Slide — Outlook (initial) skipped — recipient inbox will be shown instead\n`);
+      // Always skip the Outlook initial slide — showing an empty sent items folder before
+      // the agent has done anything has no storytelling value. Outlook is captured at the
+      // end as an "after action" slide once the email has actually been sent.
+      if (platform === 'outlook') {
+        console.log(`  ● Slide — Outlook (initial) skipped — will capture sent items after email action\n`);
         continue;
       }
 
@@ -1719,15 +1747,6 @@ async function autoCapture(page, m365Url, discovered, demoDir, generatedScript =
     } else {
       // ── Build steps — four strategies in priority order ──
       let steps = [];
-
-      // Strategy 0: Explicit --prompts flag (highest priority — bypasses AI entirely)
-      if (runOpts.prompts && runOpts.prompts.length > 0) {
-        const promptList = Array.isArray(runOpts.prompts) ? runOpts.prompts : [runOpts.prompts];
-        steps = promptList.map((p, i) => ({
-          prompt: p, slide_label: '', extract_entity: false, entity_context: null, capture_platform_after: null,
-        }));
-        console.log(`  Using ${steps.length} explicit prompts from --prompts flag`);
-      }
 
       // Strategy 0b: Parse "Start with this prompt: X" out of instructions.
       // This lets users specify a literal first message inside the instructions field
@@ -2855,7 +2874,7 @@ export async function runCreate(opts) {
     }
 
     // STEP 2C: Generate demo script via AI (before capture)
-    const generatedScript = await generateDemoScript(discovered);
+    const generatedScript = await generateDemoScript(discovered, opts.prompts);
     updateStatus(opts, { phase: 'script_generated', agent_name: discovered.name, slug: makeSlug(discovered.name) });
     // Update intro hook if AI provided one
     if (generatedScript?.hook) {
@@ -3117,7 +3136,7 @@ export async function runPlan(opts = {}) {
 
   // Generate AI conversation script (no browser needed)
   console.log('  ● Generating conversation script...');
-  const generatedScript = await generateDemoScript(discovered);
+  const generatedScript = await generateDemoScript(discovered, opts.prompts);
 
   // ── Build planned slide list ──────────────────────────────────────────────
   const plannedSlides = [];

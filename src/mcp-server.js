@@ -96,7 +96,7 @@ const TOOLS = [
         },
         prompts: {
           type: 'string',
-          description: 'Pipe-separated (|) list of exact prompts to send in sequence, bypassing AI script generation. Each prompt becomes its own slide.',
+          description: 'Pipe-separated (|) list of suggested prompts to guide the AI script generator. The AI will use these as reference points, adapting phrasing as needed for natural flow. To use them verbatim and in order, include a phrase like "use these prompts exactly as written" in the instructions field.',
         },
         platforms: {
           type: 'string',
